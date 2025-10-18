@@ -38,11 +38,10 @@ Key options:
 - `--training_data`: dataset shorthand used by the datamodule (e.g., `MLSEn+people`).
 - `--override '<dict>'`: override config values at runtime (example below).
 
-Example with overrides and SLURM-style settings (see `script/test_train_ll.sh`):
 
 ```bash
 python trainer.py \
-	--conf conf/85k/ll_elm_8bit_fm_mimi_token_conditioning_future_4_cond_future_1b_extended.yaml \
+	--conf conf/1b_extended.yaml \
 	--save_path /share/data/speech/ckpt/test \
 	--override "{'optimizer': {'lr': 2e-4, 'loss_function': 'FM'}, 'training': {'batch_size': 8}}" \
 	--hf_training_data --training_data "MLSEn+people" \
