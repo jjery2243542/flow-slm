@@ -2,7 +2,7 @@
 
 This repository contains code to train and run inference with the Flow-SLMs.
 
-1. Install dependencies
+## Install dependencies
 -----------------------
 
 Quick install (recommended: create and activate a conda environment first):
@@ -20,7 +20,7 @@ Notes:
 - If you plan to use the 8-bit optimizer (`AdamW8bit`), install `bitsandbytes` that matches your CUDA and PyTorch.
 - Whisper-based ASR requires `whisper` and `ffmpeg` on PATH.
 
-2. Training
+## Training
 -----------
 
 Main training script: `trainer.py`.
@@ -48,26 +48,25 @@ python trainer.py \
 	--strategy "deepspeed_stage_3"
 ```
 
-3. Inference
+## Inference
 ------------
 
 Checkpoints 
 -------------------
 | Name | Description | Link |
 |------|-------------|------:|
-| Flow-SLM-270M | Trained on MLS (45k hours) | https://drive.google.com/file/d/1j9Gj39T-9lPN_ebGZ_xCGu9W3SQphjEN/view?usp=drive_link |
-| Flow-SLM-1B | Trained on MLS (45k hours) | https://drive.google.com/file/d/1lh2JSNt3NUn--3uQscwteD-5YQlmno5z/view?usp=drive_link |
-| Flow-SLM-1B-extend | Trained on MLS (45k hours) + People's Speech clean subset (20k) | https://drive.google.com/file/d/1YKiv-BD5r3MoCUZemHSWbZFv_diE2AbH/view?usp=drive_link |
+| Flow-SLM-270M | Trained on MLS (45k hours) | [Download (Google Drive)](https://drive.google.com/file/d/1j9Gj39T-9lPN_ebGZ_xCGu9W3SQphjEN/view?usp=drive_link) |
+| Flow-SLM-1B | Trained on MLS (45k hours) | [Download (Google Drive)](https://drive.google.com/file/d/1lh2JSNt3NUn--3uQscwteD-5YQlmno5z/view?usp=drive_link) |
+| Flow-SLM-1B-extend | Trained on MLS (45k hours) + People's Speech clean subset (20k) | [Download (Google Drive)](https://drive.google.com/file/d/1YKiv-BD5r3MoCUZemHSWbZFv_diE2AbH/view?usp=drive_link) |
 
-Main inference script: `inference.py`.
-
-Helper scripts:
 - `prompt_inference.sh` - example for inference.
 
-Important inference notes:
+notes:
 - To transcribe generated audio with Whisper, install `whisper` and optionally set `--download_whisper_root` to cache models.
 
-4. Citation
+- `eval_likelihood.sh` - example script for computing likelihood (Salmon, ZeroSpeech evaluation).
+
+## Citation
 -----------
 ```
 @article{chou2025flow,

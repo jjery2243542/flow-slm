@@ -215,23 +215,23 @@ class LanguageModeling(pl.LightningModule):
             return total_loss, flow_loss_val, token_loss_val, token_acc
 
         elif reduction == "utterance":
-            loss = (torch.sum(flow_loss * padding_mask, dim=1) / torch.sum(padding_mask, dim=1)).mean(dim=1)
+            flow_loss_val = (torch.sum(flow_loss * padding_mask, dim=1) / torch.sum(padding_mask, dim=1)).mean(dim=1)
             if token_loss is not None:
                 # by default, ignore eos token during evaluation
                 if self.args.ignore_eos and not self.training:
                     eos_index = self.gslm_pipeline.eos_token_index
                     L = token_padding_mask.shape[1]
                     token_padding_mask = token_padding_mask * (tokens[:, :L].squeeze(dim=2) != eos_index)
-                token_loss = torch.sum(token_loss * token_padding_mask, dim=1) / torch.sum(token_padding_mask, dim=1)
+                token_loss_val = torch.sum(token_loss * token_padding_mask, dim=1) / torch.sum(token_padding_mask, dim=1)
 
         elif reduction == "unnormalized_utterance":
-            loss = torch.sum(flow_loss * padding_mask, dim=1).sum(dim=1)
+            flow_loss_val = torch.sum(flow_loss * padding_mask, dim=1).sum(dim=1)
             if token_loss is not None:
-                token_loss = torch.sum(token_loss * token_padding_mask, dim=1)
+                token_loss_val = torch.sum(token_loss * token_padding_mask, dim=1)
 
         total_loss = self.conf.optimizer.loss_weight * flow_loss_val
         if self.conf.optimizer.token_loss_weight > 0 and token_loss is not None:
-            total_loss += self.conf.optimizer.token_loss_weight * token_loss
+            total_loss += self.conf.optimizer.token_loss_weight * token_loss_val
 
         if self.conf.optimizer.token_loss_weight > 0 and token_loss is not None:
             if hasattr(self.conf.model, "extra_future_tokens") and self.conf.model.extra_future_tokens > 0:
@@ -243,7 +243,7 @@ class LanguageModeling(pl.LightningModule):
         else:
             token_acc = None
 
-        return total_loss, flow_loss_val, token_loss, token_acc
+        return total_loss, flow_loss_val, token_loss_val, token_acc
 
     def training_step(self, batch, batch_idx):
         total_loss, flow_loss_val, token_loss, token_acc = self.forward(batch)
@@ -413,7 +413,6 @@ def main():
             accumulate_grad_batches=conf.training.accumulate_grad_batches,
             default_root_dir=ckpt_dir,
             use_distributed_sampler=False,
-            inference_mode=inference_mode,
         )
 
     data = SpeechDataModule(args, conf)
