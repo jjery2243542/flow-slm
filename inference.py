@@ -1,7 +1,5 @@
 import argparse
 import csv
-import glob
-import json
 from pathlib import Path
 import tqdm
 
@@ -13,19 +11,15 @@ import torchaudio
 import yaml
 
 from decode import Sampler
-from pipeline import GSLMPipeline
 from trainer import LanguageModeling
 from model_utils import reduce_features
 from dataset import get_dataloader
-from encoders import MimiDecoder
+from codec_models import MimiDecoder
 
-# optional heavy deps imported lazily (Whisper, hifigan)
 try:
     import whisper
 except Exception:
     whisper = None
-
-# Local helper classes and functions (kept and slightly cleaned from original file)
 
 class WhisperWrapper:
     def __init__(self, model_card="small.en", device="cuda", resample=True, download_root=None):
@@ -82,9 +76,9 @@ class Processor:
 
         with torch.no_grad():
             if getattr(self.ssl_model, "n_quantizers", 0) > 0:
-                feats, codes = self.ssl_model(wavs, wav_lens, layer_idx=self.conf.model.layer_idx)
+                feats, codes = self.ssl_model(wavs, wav_lens)
             else:
-                feats = self.ssl_model(wavs, wav_lens, layer_idx=self.conf.model.layer_idx)
+                feats = self.ssl_model(wavs, wav_lens)
 
             if getattr(self.conf.model, "norm", None) == "static":
                 feats = (feats - self.mean) / self.std
@@ -173,7 +167,7 @@ def load_model(args, conf, device="cuda"):
     model_args = type("Args", (), {})()
     lm = LanguageModeling(model_args, conf)
     state_dict = torch.load(args.ckpt_path, map_location="cpu")
-    lm.load_state_dict(state_dict, strict=False)
+    lm.load_state_dict(state_dict)
     lm = lm.to(device).to(torch.bfloat16)
     return lm
 
@@ -191,6 +185,7 @@ def save_wav(wav, path, sample_rate):
     torchaudio.save(path, wav.cpu(), sample_rate, backend="soundfile")
 
 def run_unconditional(args, sampler, processor):
+    codec_size = 2048
     samples_to_generate = args.n_samples
     batch_size = args.batch_size
     generated = 0
@@ -198,7 +193,7 @@ def run_unconditional(args, sampler, processor):
         cur_bs = min(batch_size, samples_to_generate - generated)
         with torch.no_grad():
             # eos_token is set to the last token id if token loss is used
-            eos_aux_token = 2048 + processor.conf.model.n_special_tokens - 1 if getattr(processor.conf.optimizer, "token_loss_weight", 0) > 0 else None
+            eos_aux_token = codec_size + processor.conf.model.n_special_tokens - 1 if getattr(processor.conf.optimizer, "token_loss_weight", 0) > 0 else None
             samples, stop_steps = sampler.sample(batch_size=cur_bs, min_len=args.min_len, max_len=args.max_len, ode_steps=args.ode_steps, token_temperature=args.token_temperature, temperature=args.temperature, solver=args.solver, eos_aux_token=eos_aux_token, cfg_scale=args.cfg_scale, topk=args.topk, topp=args.topp, penalize_silence=args.penalize_silence, penalize_weight=args.penalize_weight)
 
         samples = processor.unmerge_and_unnormalize(samples)
@@ -208,14 +203,15 @@ def run_unconditional(args, sampler, processor):
         generated += cur_bs
 
 
-def run_conditional(args, sampler, processor, prompt_wavs, lm, frame_rate):
+def run_conditional(args, sampler, processor, prompt_wavs):
+    codec_size = 2048
     for prompt_idx, (wav, duration) in enumerate(prompt_wavs):
         reduced_feats = processor.get_ssl_feats(wav, duration, duplicate=args.batch_size)
         reduced_feats = reduced_feats.to(torch.bfloat16)
 
         for batch_idx in range(args.samples_per_prompt // args.batch_size):
             with torch.no_grad():
-                eos_aux_token = 2048 + processor.conf.model.n_special_tokens - 1 if getattr(processor.conf.optimizer, "token_loss_weight", 0) > 0 else None
+                eos_aux_token = codec_size + processor.conf.model.n_special_tokens - 1 if getattr(processor.conf.optimizer, "token_loss_weight", 0) > 0 else None
                 samples, stop_steps = sampler.sample(batch_size=args.batch_size, min_len=args.min_len, max_len=args.max_len, ode_steps=args.ode_steps, token_temperature=args.token_temperature, temperature=args.temperature, prompts=reduced_feats, solver=args.solver, eos_aux_token=eos_aux_token, cfg_scale=args.cfg_scale, topk=args.topk, topp=args.topp, penalize_silence=args.penalize_silence, penalize_weight=args.penalize_weight)
 
             samples = processor.unmerge_and_unnormalize(samples)
@@ -258,8 +254,7 @@ def main():
     if prompt_wavs is None:
         gen_iter = run_unconditional(args, sampler, processor)
     else:
-        frame_rate = 12.5
-        gen_iter = run_conditional(args, sampler, processor, prompt_wavs, lm, frame_rate)
+        gen_iter = run_conditional(args, sampler, processor, prompt_wavs)
 
     for idx, (wav, sr) in enumerate(tqdm.tqdm(gen_iter)):
         if args.save_wav and args.output_dir:

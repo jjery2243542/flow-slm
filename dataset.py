@@ -4,7 +4,7 @@ from datasets import concatenate_datasets
 import torchaudio
 import os
 from datasets import load_dataset
-import speechbrain as sb
+from utils import batch_pad_right
 import random
 import torch
 from typing import Optional, Tuple, List, Sequence
@@ -172,7 +172,7 @@ class Collator:
     def wav_collate_fn(self, batch: Sequence[Tuple[str, torch.Tensor]]):
         ids = [entry[0] for entry in batch]
         wavs = [entry[1] for entry in batch]
-        wavs, wav_len = sb.utils.data_utils.batch_pad_right(wavs)
+        wavs, wav_len = batch_pad_right(wavs)
         return ids, wavs, wav_len
 
 

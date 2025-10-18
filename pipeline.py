@@ -1,16 +1,10 @@
-"""Main pipeline module for continuous GSLM.
-
-This module contains the GSLMPipeline class which orchestrates the entire
-model including SSL encoders, decoders, and all processing steps.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from speechbrain.dataio.dataio import length_to_mask
+from utils import length_to_mask
 
-from encoders import (
+from codec_models import (
     MimiEncoder, 
 )
 from decoders import (
@@ -20,12 +14,6 @@ from model_utils import reduce_features, split_features
 
 
 class GSLMPipeline(nn.Module):
-    """Main pipeline for continuous GSLM.
-    
-    This class orchestrates the entire model including SSL encoders, decoders,
-    and all processing steps from raw audio to final outputs.
-    """
-    
     def __init__(self, conf, args):
         super().__init__()
         self.conf = conf
@@ -110,7 +98,6 @@ class GSLMPipeline(nn.Module):
 
             n_res_blocks = self.conf.model.n_res_blocks
             if hasattr(self.conf.model, "ssl_model") and self.conf.model.ssl_model == "mimi":
-                # for mimi use the newer OPTDecoderWrapperV2
                 self.decoder = ELMDecoderWrapper(
                     model,
                     input_dim=input_dim,
@@ -145,9 +132,9 @@ class GSLMPipeline(nn.Module):
     def forward(self, wavs, wav_len):
         with torch.no_grad():
             if self.conf.model.ssl_model == "mimi" and hasattr(self.conf.model, "n_quantizers") and self.conf.model.n_quantizers > 0:
-                ssl_feats, tokens = self.ssl_model(wavs, wav_len, layer_idx=self.conf.model.layer_idx)
+                ssl_feats, tokens = self.ssl_model(wavs, wav_len)
             else:
-                ssl_feats = self.ssl_model(wavs, wav_len, layer_idx=self.conf.model.layer_idx)
+                raise NotImplementedError(f"SSL model {self.conf.model.ssl_model} not supported.")
 
             ssl_abs_len = torch.round(wav_len * ssl_feats.shape[1]).long()
             ssl_padding_mask = ~length_to_mask(ssl_abs_len, dtype=torch.bool)

@@ -2,41 +2,8 @@ from pipeline import GSLMPipeline
 import torch
 from torch import nn
 from losses import FlowLoss
-from torchdiffeq import odeint
 import torch.nn.functional as F
 from typing import Optional, Tuple
-
-# Compute log-likelihood using an ODE-based flow model
-@torch.no_grad()
-def compute_log_likelihood(net, x, z, steps: int = 512, atol: float = 1e-5, rtol: float = 1e-5, solver: str = "euler"):
-    fevals = 0
-
-    def ode_fn(t, x_tuple):
-        nonlocal fevals
-        with torch.enable_grad():
-            x_curr = x_tuple[0].detach().requires_grad_()
-            t_expand = t.expand(x_curr.shape[0], x_curr.shape[1])
-            d = net(x_curr, t_expand, z)
-            fevals += 1
-            # random Rademacher vector for Hutchinson trace estimate
-            v = torch.randint_like(x_curr, 2) * 2 - 1
-            grad = torch.autograd.grad((d * v).sum(), x_curr)[0]
-            d_ll = (v * grad).flatten(-1).sum(-1)
-        return d.detach(), d_ll
-
-    x_init = (x, x.new_zeros([x.shape[0], x.shape[1]]))
-    if solver in ("dopri5", "adaptive_heun"):
-        t = x.new_tensor([1.0, 0.0])
-        sol = odeint(ode_fn, x_init, t, atol=atol, rtol=rtol, method=solver)
-    else:
-        t = torch.linspace(1.0, 0, steps).to(x.device)
-        sol = odeint(ode_fn, x_init, t, method=solver)
-    latent, delta_ll = sol[0][-1], sol[1][-1]
-    ll_prior = torch.distributions.Normal(0, 1).log_prob(latent)
-    ll_prior = ll_prior.flatten(2).sum(2)
-
-    return ll_prior + delta_ll, {'fevals': fevals, "latent": latent, "delta_ll": delta_ll, "ll_prior": ll_prior}
-
 
 class Sampler(torch.nn.Module):
     def __init__(self, gslm_pipeline: GSLMPipeline, flow_loss: FlowLoss, frame_rate: int = 12.5, silence_indices: Optional[list] = None):
@@ -47,7 +14,6 @@ class Sampler(torch.nn.Module):
         self.reduction_factor = self.conf.model.reduction_factor
         self.flow_loss = flow_loss
         self.frame_rate = frame_rate
-        self.count = 0
         self.sigmoid = nn.Sigmoid()
         # default silence indices can be overridden via constructor
         self.silence_indices = silence_indices or [1049, 127, 1880, 1492, 972, 1031, 395, 2029, 581, 175, 1926, 407, 1316]
@@ -120,7 +86,6 @@ class Sampler(torch.nn.Module):
         Generate tokens using the GSLM pipeline and the flow model.
         Returns (generated_tokens_without_bos, stop_steps)
         """
-        self.count += 1
         bos_token = torch.full((batch_size, 1), self.gslm_pipeline.bos_index, dtype=torch.long, device=device)
         bos_vec = self.gslm_pipeline.embed(bos_token)
 
@@ -136,7 +101,7 @@ class Sampler(torch.nn.Module):
 
         for step in range(start_step, max_infer_steps):
             padding_mask = prev_tokens.new_ones((batch_size, prev_tokens.shape[1]))
-            logits, is_stop_token, aux_output = self.gslm_pipeline.decoder(prev_tokens, padding_mask)
+            logits, aux_output = self.gslm_pipeline.decoder(prev_tokens, padding_mask)
 
             # handle extra_future_tokens -> split aux_output into chunks if configured
             if getattr(self.conf.model, "extra_future_tokens", 0) > 0:
@@ -161,10 +126,6 @@ class Sampler(torch.nn.Module):
                         is_stop_token = tok.squeeze(dim=1) == eos_aux_token if eos_aux_token is not None else torch.zeros(batch_size, dtype=torch.bool, device=device)
                         end_at_this_step = is_stop_token & (stop_steps == 0)
                 tokens = torch.stack(merge_tokens, dim=2)
-            else:
-                # is_stop_token may be logits; convert via sigmoid
-                is_stop_prob = self.sigmoid(is_stop_token) if not isinstance(is_stop_token, torch.Tensor) or is_stop_token.dtype != torch.bool else is_stop_token
-                end_at_this_step = (is_stop_prob[:, -1] > threshold) & (stop_steps == 0)
 
             stop_steps[end_at_this_step] = step
             has_ended = has_ended | end_at_this_step

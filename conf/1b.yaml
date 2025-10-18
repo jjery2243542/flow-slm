@@ -1,0 +1,46 @@
+model:
+  freeze: True
+  ssl_model: "mimi"
+  n_quantizers: 1 # only use semantic token
+  decoder: "OpenELM-1B"
+  flash_attention: True
+  ssl_dim: 512
+  decoder_dim: 2048
+  reduction_factor: 1
+  n_special_tokens: 12
+  add_special_token_to_embedding_table: True
+  token_emb_dim: 512
+  n_res_blocks: 6
+  token_conditioning: True
+  future_conditioning: True
+  norm: "static"
+  mean_path: "statistics/mimi_mean.npy"
+  std_path: "statistics/mimi_std.npy"
+  extra_future_tokens: 4 
+
+optimizer:
+  name: AdamW8bit
+  lr: 0.0002
+  loss_function: FM
+  betas: [0.9, 0.98]
+  eps: 1.0E-6
+  weight_decay: 0.01
+  null_prob: 0.05
+  loss_weight: 1.0
+  token_loss_weight: 1.0
+  sigma_min: 1.0E-5
+  t_dist: logit_normal
+  percentile_clipping: 80
+
+data:
+    sr: 16000
+    ext: flac
+    vad: True
+
+training:
+  batch_size: 32
+  num_workers: 4
+  accumulate_grad_batches: 1
+  num_warmup_steps: 5000 # 2000
+  max_steps: 85000
+  min_lr_ratio: 0.1

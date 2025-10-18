@@ -9,16 +9,11 @@ of mode/device issues, and improve readability.
 import torch
 import torch.nn.functional as F
 import lightning.pytorch as pl
-from torchmetrics.functional.classification import binary_f1_score
-from speechbrain.dataio.dataio import length_to_mask
-from typing import Optional, Tuple
-from scheduler import get_cosine_schedule_with_warmup
+from utils import get_cosine_schedule_with_warmup
 from pipeline import GSLMPipeline
 from losses import FlowLoss
 import argparse
 import os
-import glob
-import shutil
 import signal
 import yaml
 import munch
@@ -26,7 +21,7 @@ import sys
 from pathlib import Path
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
-from utils import replace_values, extract_number, writing_output_to_file, writing_zerospeech_output_to_file, SaveAtSpecificStep, select_latest_ckpt
+from utils import replace_values, writing_output_to_file, SaveAtSpecificStep, select_latest_ckpt
 from lightning.pytorch.plugins.environments import SLURMEnvironment
 from dataset import SpeechDataModule
 
@@ -234,7 +229,7 @@ class LanguageModeling(pl.LightningModule):
             if token_loss is not None:
                 token_loss = torch.sum(token_loss * token_padding_mask, dim=1)
 
-        total_loss = self.conf.optimizer.loss_weight * loss
+        total_loss = self.conf.optimizer.loss_weight * flow_loss_val
         if self.conf.optimizer.token_loss_weight > 0 and token_loss is not None:
             total_loss += self.conf.optimizer.token_loss_weight * token_loss
 
@@ -248,15 +243,15 @@ class LanguageModeling(pl.LightningModule):
         else:
             token_acc = None
 
-        return total_loss, loss, token_loss, token_acc
+        return total_loss, flow_loss_val, token_loss, token_acc
 
     def training_step(self, batch, batch_idx):
-        total_loss, loss, token_loss, token_acc = self.forward(batch)
+        total_loss, flow_loss_val, token_loss, token_acc = self.forward(batch)
         current_lr = self.optimizers().param_groups[0]["lr"]
         if torch.isnan(total_loss):
             print("nan detected! skip this batch")
             return torch.tensor(0.0, device=self.device, requires_grad=True)
-        self.log("train/loss", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
+        self.log("train/loss", total_loss, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
         if token_loss is not None:
             self.log("train/token_loss", token_loss, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
             self.log("train/token_acc", token_acc, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
@@ -264,8 +259,8 @@ class LanguageModeling(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        total_loss, loss, token_loss, token_acc = self.forward(batch)
-        self.log("valid/loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        total_loss, flow_loss_val, token_loss, token_acc = self.forward(batch)
+        self.log("valid/loss", flow_loss_val, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         if token_loss is not None:
             self.log("valid/token_loss", token_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             self.log("valid/token_acc", token_acc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
@@ -274,27 +269,26 @@ class LanguageModeling(pl.LightningModule):
     def predict_step(self, batch, batch_idx):
         with torch.enable_grad():
             ids, wavs, wav_len = batch
-            total_loss, loss, token_loss, token_acc = self.forward(batch, reduction=self.args.reduction)
+            total_loss, flow_loss_val, token_loss, token_acc = self.forward(batch, reduction=self.args.reduction)
 
         if token_loss is not None:
-            return ids, -loss, -token_loss
+            return ids, -flow_loss_val, -token_loss
         else:
-            return ids, -loss
+            return ids, -flow_loss_val
 
     def test_step(self, batch, batch_idx):
-        total_loss, loss, token_loss, token_acc = self.forward(batch, reduction="token")
-        self.log("test/loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        total_loss, flow_loss_val, token_loss, token_acc = self.forward(batch, reduction="token")
+        self.log("test/loss", flow_loss_val, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         if token_loss is not None:
             self.log("test/token_loss", token_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             self.log("test/token_acc", token_acc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        return loss, token_loss, token_acc
-
+        return total_loss, token_loss, token_acc
 def main():
     parser = argparse.ArgumentParser(description="")
     parser.add_argument("--data_dir", help="Path to dataset folder", default=None)
     parser.add_argument("--ckpt_path", type=str, help="GSLM checkpoint, for inference only", default=None)
     parser.add_argument("--conf", help="Path to config file")
-    parser.add_argument("--train_id_file", help="Path to training dataset ids", default=None)
+    parser.add_argument("--train_id_file", help="Path to training dataset ids if not using hf_training_data", default=None)
     parser.add_argument("--hf_training_data", action="store_true")
     parser.add_argument("--validation_only", action="store_true")
     parser.add_argument("--predict_only", action="store_true")
@@ -302,14 +296,10 @@ def main():
     parser.add_argument("--valid_id_file", help="Path to validation dataset ids for LJSpeech")
     parser.add_argument("--predict_id_file", help="Path to prediction dataset ids for LJSpeech")
     parser.add_argument("--prediction_output_dir", help="prediction file path to save")
-    parser.add_argument("--split", help="prediction file path to save, for zerospeech", default="dev")
-    parser.add_argument("--task", help="prediction file path to save, for zerospeech", default="lexical")
-    parser.add_argument("--zerospeech", help="whether is predicting files in zeroseech", action="store_true")
     parser.add_argument("--save_path", help="Path to save checkpoints")
     parser.add_argument("--reduction", help="reduction approach for prediction", default="utterance")
     parser.add_argument("--ignore_eos", action="store_true", help="ignore eos token for prediction")
     parser.add_argument("--use_k_future_tokens", default=0, type=int, help="use k future tokens for prediction")
-    parser.add_argument("--compute_log_likelihood", action="store_true", help="whether to compute log likelihood for prediction")
     parser.add_argument("--every_n_steps", help="every n steps, do validation and checkpointing", default=5000, type=int)
     parser.add_argument(
         "--strategy",
@@ -412,8 +402,6 @@ def main():
         language_modeling.eval()
         precision = "bf16-mixed" if torch.cuda.is_bf16_supported() else 32
         ckpt_dir = os.path.dirname(args.ckpt_path)
-        inference_mode = False if args.compute_log_likelihood else True
-        print(f"inference_mode: {inference_mode}")
         trainer = pl.Trainer(
             accelerator="gpu",
             max_steps=conf.training.max_steps,
@@ -428,8 +416,6 @@ def main():
             inference_mode=inference_mode,
         )
 
-    print("trainer.num_devices", trainer.num_devices)
-
     data = SpeechDataModule(args, conf)
 
     if training_mode:
@@ -443,10 +429,7 @@ def main():
     elif args.predict_only:
         data.setup(stage="predict")
         output = trainer.predict(language_modeling, data)
-        if args.zerospeech:
-            writing_zerospeech_output_to_file(output, args.prediction_output_dir, split=args.split, token=conf.optimizer.token_loss_weight > 0, task=args.task)
-        else:
-            writing_output_to_file(output, args.prediction_output_dir, token=conf.optimizer.token_loss_weight > 0, log_likelihood=args.compute_log_likelihood)
+        writing_output_to_file(output, args.prediction_output_dir, token=conf.optimizer.token_loss_weight > 0)
 
 
 if __name__ == "__main__":
