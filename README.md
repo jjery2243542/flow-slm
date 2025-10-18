@@ -57,7 +57,7 @@ Checkpoints
 |------|-----|--------------:|
 | Flow-SLM-270M | Trained on MLS (45k hours) | [Download (Google Drive)](https://drive.google.com/file/d/1j9Gj39T-9lPN_ebGZ_xCGu9W3SQphjEN/view?usp=drive_link) |
 | Flow-SLM-1B | Trained on MLS (45k hours) | [Download (Google Drive)](https://drive.google.com/file/d/1lh2JSNt3NUn--3uQscwteD-5YQlmno5z/view?usp=drive_link) |
-| Flow-SLM-1B-extend | Trained on MLS (45k hours) + People's Speech clean subset (20k) | [Download (Google Drive)](https://drive.google.com/file/d/1YKiv-BD5r3MoCUZemHSWbZFv_diE2AbH/view?usp=drive_link) |
+| Flow-SLM-1B-extended | Trained on MLS (45k hours) + People's Speech clean subset (20k) | [Download (Google Drive)](https://drive.google.com/file/d/1YKiv-BD5r3MoCUZemHSWbZFv_diE2AbH/view?usp=drive_link) |
 
 - `prompt_inference.sh` - example for inference.
 
