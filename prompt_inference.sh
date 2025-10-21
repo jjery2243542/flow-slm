@@ -14,7 +14,7 @@ batch_size=4
 solver="euler"
 
 ckpt_path="/share/data/speech/jjery2243542/continuous_gslm/ckpt/MLSEn+people/FM/5e-4/85k/reduction_1/token_loss_weight_1.0/n_res_blocks_6/ll_elm_8bit_fm_mimi_token_conditioning_future_4_cond_future_1b_extended/model-step=0095000.ckpt/modified_ckpt/1b_extend.bin"
-conf_path="conf/1b_extend.yaml"
+conf_path="conf/1b_extended.yaml"
 output_dir="./test_output/"
 
 if [ ! -d $output_dir ]; then
