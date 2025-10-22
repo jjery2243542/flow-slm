@@ -3,13 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from utils import length_to_mask
-
-from codec_models import (
-    MimiEncoder, 
-)
-from decoders import (
-    ELMDecoderWrapper,
-)
+from model import MimiEncoder, ELMDecoderWrapper
 from model_utils import reduce_features, split_features
 
 

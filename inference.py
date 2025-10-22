@@ -14,7 +14,7 @@ from decode import Sampler
 from trainer import LanguageModeling
 from model_utils import reduce_features
 from dataset import get_dataloader
-from codec_models import MimiDecoder
+from model import MimiDecoder
 
 try:
     import whisper
