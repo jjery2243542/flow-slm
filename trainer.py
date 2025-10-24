@@ -213,6 +213,13 @@ class LanguageModeling(pl.LightningModule):
                 flow_loss, padding_mask, token_loss, token_padding_mask
             )
             return total_loss, flow_loss_val, token_loss_val, token_acc
+        
+        elif reduction == "token_seq":
+            flow_loss_val = flow_loss
+            if token_loss is not None:
+                token_loss_val = token_loss
+            else:
+                token_loss_val = None
 
         elif reduction == "utterance":
             flow_loss_val = (torch.sum(flow_loss * padding_mask, dim=1) / torch.sum(padding_mask, dim=1)).mean(dim=1)
@@ -229,19 +236,8 @@ class LanguageModeling(pl.LightningModule):
             if token_loss is not None:
                 token_loss_val = torch.sum(token_loss * token_padding_mask, dim=1)
 
-        total_loss = self.conf.optimizer.loss_weight * flow_loss_val
-        if self.conf.optimizer.token_loss_weight > 0 and token_loss is not None:
-            total_loss += self.conf.optimizer.token_loss_weight * token_loss_val
-
-        if self.conf.optimizer.token_loss_weight > 0 and token_loss is not None:
-            if hasattr(self.conf.model, "extra_future_tokens") and self.conf.model.extra_future_tokens > 0:
-                token_logits_i = torch.chunk(token_logits, self.conf.model.extra_future_tokens, dim=2)[0]
-                first_token_target = tokens[:, :-self.conf.model.extra_future_tokens + 1]
-                token_acc = torch.sum((torch.argmax(token_logits_i, dim=-1) == first_token_target.reshape(first_token_target.shape[0], first_token_target.shape[1] * first_token_target.shape[2])).float() * token_padding_mask) / torch.sum(token_padding_mask)
-            else:
-                token_acc = torch.sum((torch.argmax(token_logits, dim=-1) == tokens.reshape(tokens.shape[0], tokens.shape[1] * tokens.shape[2])).float() * token_padding_mask) / torch.sum(token_padding_mask)
-        else:
-            token_acc = None
+        total_loss = None  # not used in non-token reduction modes
+        token_acc = None  # not used in non-token reduction modes
 
         return total_loss, flow_loss_val, token_loss_val, token_acc
 

@@ -47,7 +47,9 @@ def load_audio_list(root_dir: str, csv_path: str, target_sample_rate: int):
             waveform, sample_rate = torchaudio.load(str(audio_path))
             if sample_rate != target_sample_rate:
                 waveform = torchaudio.transforms.Resample(sample_rate, target_sample_rate)(waveform)
-            data.append((waveform, duration))
+            prompt_id = row["path"].replace("/", "_").replace(".wav", "").replace(".flac", "")
+            data.append((prompt_id, waveform, duration))
+
     return data
 
 
@@ -199,13 +201,13 @@ def run_unconditional(args, sampler, processor):
         samples = processor.unmerge_and_unnormalize(samples)
         wavs = processor.batch_vocoding(samples, stop_steps, args.num_quantizers)
         for wav in wavs:
-            yield wav, processor.sample_rate
+            yield str(generated), wav, processor.sample_rate
         generated += cur_bs
 
 
 def run_conditional(args, sampler, processor, prompt_wavs):
     codec_size = 2048
-    for prompt_idx, (wav, duration) in enumerate(prompt_wavs):
+    for prompt_idx, (prompt_id, wav, duration) in enumerate(prompt_wavs):
         reduced_feats = processor.get_ssl_feats(wav, duration, duplicate=args.batch_size)
         reduced_feats = reduced_feats.to(torch.bfloat16)
 
@@ -218,7 +220,7 @@ def run_conditional(args, sampler, processor, prompt_wavs):
             wavs = processor.batch_vocoding(samples, stop_steps, args.num_quantizers)
 
             for i, wav in enumerate(wavs):
-                yield wav, processor.sample_rate
+                yield prompt_id, wav, processor.sample_rate
 
 
 def main():
@@ -256,12 +258,12 @@ def main():
     else:
         gen_iter = run_conditional(args, sampler, processor, prompt_wavs)
 
-    for idx, (wav, sr) in enumerate(tqdm.tqdm(gen_iter)):
+    for idx, (prompt_id, wav, sr) in enumerate(tqdm.tqdm(gen_iter)):
         if args.save_wav and args.output_dir:
             if prompt_wavs is not None:
-                prompt_id = (idx // args.samples_per_prompt)
+                #prompt_id = (idx // args.samples_per_prompt)
                 sample_idx = idx % args.samples_per_prompt
-                out_path = Path(args.output_dir) / f"{prompt_id:04d}_{sample_idx:04d}.wav"
+                out_path = Path(args.output_dir) / f"{prompt_id}_{sample_idx:04d}.wav"
             else:
                 out_path = Path(args.output_dir) / f"{idx:04d}.wav"
             save_wav(wav, str(out_path), sr)
@@ -276,7 +278,7 @@ def main():
             res = None
 
         if transcription_file is not None and res is not None:
-            print(f"{idx:04d}\t{res.text}", file=transcription_file, flush=True)
+            print(f"{prompt_id}\t{res.text}", file=transcription_file, flush=True)
 
     if transcription_file is not None:
         transcription_file.close()
