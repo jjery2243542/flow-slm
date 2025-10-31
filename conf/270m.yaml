@@ -10,7 +10,7 @@ model:
   n_special_tokens: 12
   add_special_token_to_embedding_table: True
   token_emb_dim: 256
-  n_res_blocks: 6
+  n_res_blocks: 3
   token_conditioning: True
   future_conditioning: True
   norm: "static"
@@ -20,7 +20,7 @@ model:
 
 optimizer:
   name: AdamW8bit
-  lr: 0.0002
+  lr: 0.0005
   loss_function: FM
   betas: [0.9, 0.98]
   eps: 1.0E-6
@@ -30,7 +30,7 @@ optimizer:
   token_loss_weight: 1.0
   sigma_min: 1.0E-5
   t_dist: logit_normal
-  percentile_clipping: 80
+  percentile_clipping: 60
 
 data:
     sr: 16000
