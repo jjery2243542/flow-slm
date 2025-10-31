@@ -223,7 +223,6 @@ class SimpleMLPAdaLN(nn.Module):
 
 		self.time_embed = TimestepEmbedder(model_channels)
 		self.cond_embed = nn.Linear(z_channels, model_channels)
-
 		self.input_proj = nn.Linear(in_channels, model_channels)
 
 		res_blocks = []
@@ -313,10 +312,15 @@ class BaseDecoderWrapper(torch.nn.Module):
 		if output_layer == "linear":
 			self.output_proj = torch.nn.Linear(decoder_dim, output_dim)
 		elif output_layer == "simple_mlp":
-			if decoder_dim > 1280:
-				self.output_proj = SimpleMLPAdaLN(output_dim, decoder_dim, output_dim, decoder_dim + token_emb_dim, n_res_blocks)
-			else:
-				self.output_proj = SimpleMLPAdaLN(output_dim, decoder_dim * 2, output_dim, decoder_dim + token_emb_dim, n_res_blocks)
+			if decoder_dim > 1280 and output_dim <= 1280:
+				model_dim = decoder_dim 
+			elif decoder_dim > 1280 and output_dim > 1280:
+				model_dim = max(decoder_dim, output_dim)
+			elif decoder_dim <= 1280 and output_dim < decoder_dim * 2:
+				model_dim = decoder_dim * 2
+			elif decoder_dim <= 1280 and output_dim >= decoder_dim * 2:
+				model_dim = output_dim
+			self.output_proj = SimpleMLPAdaLN(output_dim, model_dim, output_dim, decoder_dim + token_emb_dim, n_res_blocks)
 
 		if aux_output_dim:
 			self.aux_output_proj = torch.nn.Linear(decoder_dim, aux_output_dim)
@@ -344,8 +348,6 @@ class ELMDecoderWrapper(BaseDecoderWrapper):
 		self,
 		input_tokens: torch.Tensor = None,
 		attention_mask: Optional[torch.Tensor] = None,
-		past_key_values: Optional[List[torch.FloatTensor]] = None,
-		use_cache: Optional[bool] = None,
 		cache_position: Optional[torch.Tensor] = None,
 	):
 		"""Forward pass for ELM decoder."""
@@ -398,3 +400,145 @@ class ELMDecoderWrapper(BaseDecoderWrapper):
 
 		# remove the last frame
 		return logits, aux_output
+
+
+class ELMDecoderWrapperWithText(BaseDecoderWrapper):
+	"""Decoder wrapper that accepts an extra text input and emits an extra text output.
+
+	The wrapper uses the provided `elm` model's input embeddings to embed the
+	text input tokens, projects them to the decoder dimensionality, pools the
+	text embeddings into a per-batch conditioning vector and adds that vector
+	to the decoder token embeddings before running the transformer. It also
+	exposes text logits produced by the ELM model's output projection (lm_head)
+	computed from the final hidden states.
+	"""
+
+	def __init__(
+		self,
+		elm,
+		input_dim: int,
+		decoder_dim: int,
+		output_dim: int,
+		aux_output_dim: Optional[int] = None,
+		output_layer: str = "linear",
+		n_res_blocks: int = 3,
+		aux_output_layer_idx: Optional[int] = None,
+		token_emb_dim: int = 0,
+	):
+		super().__init__(elm, input_dim, decoder_dim, output_dim, aux_output_dim, output_layer, n_res_blocks, aux_output_layer_idx, token_emb_dim)
+		# Keep reference to the high-level ELM model so we can access its embeddings and output head
+		self.elm = elm
+		self.decoder = elm.transformer
+
+		# Input token embedding module from the original ELM model
+		# (expected to be an nn.Embedding)
+		self.elm_token_embeddings = elm.get_input_embeddings()
+
+		# Project text embeddings (elm embedding dim -> decoder dim)
+		emb_dim = getattr(self.elm_token_embeddings, "embedding_dim", None)
+		if emb_dim is None:
+			# fallback: infer from weight
+			emb_dim = self.elm_token_embeddings.weight.shape[1]
+
+	def forward(
+		self,
+		input_tokens: torch.Tensor = None,
+		text_input_ids: Optional[torch.LongTensor] = None,
+		attention_mask: Optional[torch.Tensor] = None,
+		cache_position: Optional[torch.Tensor] = None,
+		text_attention_mask: Optional[torch.Tensor] = None,
+	):
+		"""Forward pass that accepts an extra text input and returns text logits.
+
+		Args:
+			input_tokens: Main input tokens (to be projected by this wrapper)
+			attention_mask: Attention mask for decoder
+			past_key_values, use_cache, cache_position: standard caching params
+			text_input_ids: Optional token ids for the extra text input (B x T_text)
+			text_attention_mask: Optional mask for text input (B x T_text)
+
+		Returns:
+			(logits, aux_output, text_logits)
+		"""
+		# project main inputs
+		inputs_embeds = self.input_proj(input_tokens)
+
+		# compute a pooled text conditioning vector and add to inputs_embeds
+		if text_input_ids is not None:
+			# embed with elm's embedding
+			text_emb = self.elm_token_embeddings(text_input_ids)
+			if text_attention_mask is not None:
+				mask = text_attention_mask.unsqueeze(-1).to(dtype=text_emb_proj.dtype)
+				summed = (text_emb_proj * mask).sum(dim=1)
+				denom = mask.sum(dim=1).clamp(min=1e-6)
+				text_cond = summed / denom
+			else:
+				text_cond = text_emb_proj.mean(dim=1)
+
+			# broadcast and add to each time-step of inputs_embeds
+			inputs_embeds = inputs_embeds + text_cond.unsqueeze(1)
+
+		past_seen_tokens = 0
+		if cache_position is None:
+			cache_position = torch.arange(
+				past_seen_tokens,
+				past_seen_tokens + inputs_embeds.shape[1],
+				device=inputs_embeds.device,
+			)
+		position_ids = cache_position.unsqueeze(0)
+		causal_mask = self.decoder._update_causal_mask(attention_mask, inputs_embeds)
+
+		# embed positions
+		hidden_states = inputs_embeds
+		aux_hidden_states = None
+
+		for idx, decoder_layer in enumerate(self.decoder.layers):
+			layer_outputs = decoder_layer(
+				hidden_states,
+				attention_mask=causal_mask,
+				position_ids=position_ids,
+				past_key_value=None,
+				output_attentions=None,
+				use_cache=None,
+				cache_position=cache_position,
+			)
+			if self.aux_output_layer_idx is not None and idx == self.aux_output_layer_idx - 1:
+				aux_hidden_states = layer_outputs[0]
+
+			hidden_states = layer_outputs[0]
+
+		if self.aux_output_layer_idx is None:
+			aux_hidden_states = hidden_states
+
+		hidden_states = self.decoder.norm(hidden_states)
+
+		if self.output_layer_type == "simple_mlp":
+			logits = hidden_states
+		elif self.output_layer_type == "linear":
+			logits = self.output_proj(hidden_states)
+		else:
+			raise ValueError(f"output_layer {self.output_layer_type} not supported")
+
+		if hasattr(self, "aux_output_proj"):
+			aux_output = self.aux_output_proj(aux_hidden_states)
+		else:
+			aux_output = None
+
+		# compute text logits from the final hidden states using elm's output head
+		text_logits = None
+		try:
+			out_proj = None
+			# prefer explicit getter if available
+			if hasattr(self.elm, "get_output_embeddings"):
+				out_proj = self.elm.get_output_embeddings()
+			elif hasattr(self.elm, "lm_head"):
+				out_proj = getattr(self.elm, "lm_head")
+			if out_proj is not None:
+				# out_proj is typically a Linear that maps model_dim -> vocab
+				text_logits = out_proj(hidden_states)
+		except Exception:
+			# best-effort: if output projection isn't available, leave text_logits as None
+			text_logits = None
+
+		return logits, aux_output, text_logits
+

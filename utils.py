@@ -219,11 +219,11 @@ def writing_output_to_file(output, output_dir, token=False):
         for batch in output:
             if token:
                 for id, loss, token_loss in zip(*batch):
-                    if type(loss) == torch.Tensor:
+                    if type(loss) == torch.Tensor and loss.ndim > 0:
                         loss = loss.cpu().numpy()
                         # turn into string
                         loss = " ".join([str(l) for l in loss])
-                    if type(token_loss) == torch.Tensor:
+                    if type(token_loss) == torch.Tensor and token_loss.ndim > 0:
                         token_loss = token_loss.cpu().numpy()
                         token_loss = " ".join([str(l) for l in token_loss])
                     f_loss.write(f"{id} {loss}\n")

@@ -147,6 +147,8 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--cfg_scale", type=float, default=0.3)
     parser.add_argument("--solver", type=str, default="euler")
+    parser.add_argument("--schedule", type=str, default="linear")
+    parser.add_argument("--shift_alpha", type=float, default=1.0)
     parser.add_argument("--save_wav", action="store_true")
     parser.add_argument("--sample_with_gt_tokens", action="store_true")
     parser.add_argument("--output_dir", type=str, default=None)
@@ -171,6 +173,7 @@ def load_model(args, conf, device="cuda"):
     state_dict = torch.load(args.ckpt_path, map_location="cpu")
     lm.load_state_dict(state_dict)
     lm = lm.to(device).to(torch.bfloat16)
+    print(lm)
     return lm
 
 
@@ -261,7 +264,6 @@ def main():
     for idx, (prompt_id, wav, sr) in enumerate(tqdm.tqdm(gen_iter)):
         if args.save_wav and args.output_dir:
             if prompt_wavs is not None:
-                #prompt_id = (idx // args.samples_per_prompt)
                 sample_idx = idx % args.samples_per_prompt
                 out_path = Path(args.output_dir) / f"{prompt_id}_{sample_idx:04d}.wav"
             else:
@@ -278,7 +280,7 @@ def main():
             res = None
 
         if transcription_file is not None and res is not None:
-            print(f"{prompt_id}\t{res.text}", file=transcription_file, flush=True)
+            print(f"{prompt_id}_{sample_idx:04d}\t{res.text}", file=transcription_file, flush=True)
 
     if transcription_file is not None:
         transcription_file.close()

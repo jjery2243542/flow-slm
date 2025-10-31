@@ -86,6 +86,9 @@ class Sampler(torch.nn.Module):
         Generate tokens using the GSLM pipeline and the flow model.
         Returns (generated_tokens_without_bos, stop_steps)
         """
+        if eos_aux_token is None:
+            raise ValueError("eos_aux_token must be provided for stopping criteria.")
+
         bos_token = torch.full((batch_size, 1), self.gslm_pipeline.bos_index, dtype=torch.long, device=device)
         bos_vec = self.gslm_pipeline.embed(bos_token)
 
@@ -104,27 +107,35 @@ class Sampler(torch.nn.Module):
             logits, aux_output = self.gslm_pipeline.decoder(prev_tokens, padding_mask)
 
             # handle extra_future_tokens -> split aux_output into chunks if configured
-            if getattr(self.conf.model, "extra_future_tokens", 0) > 0:
-                aux_output_chunk = torch.chunk(aux_output, self.conf.model.extra_future_tokens, dim=2)
+            if getattr(self.conf.model, "extra_future_tokens", 1) > 1 and self.conf.model.reduction_factor > 1:
+                raise ValueError("extra_future_tokens > 1 is not supported when reduction_factor > 1.")
+
+            split_size = self.conf.model.extra_future_tokens * self.conf.model.reduction_factor
+            aux_output_chunk = torch.chunk(aux_output, split_size, dim=2)
 
             tokens = None
-            # If an explicit aux eos token is provided and future_conditioning is off, sample from the next semantic token 
-            if eos_aux_token is not None and not getattr(self.conf.model, "future_conditioning", False):
+            if not getattr(self.conf.model, "future_conditioning", False) and self.conf.model.reduction_factor == 1:
                 tokens = self.sample_from_logits(aux_output_chunk[0][:, -1], topk=topk, topp=topp, temperature=token_temperature,
                                                  penalize_silence=penalize_silence, penalize_weight=penalize_weight)
                 is_stop_token = tokens.squeeze(dim=1) == eos_aux_token
                 end_at_this_step = is_stop_token & (stop_steps == 0)
-            elif getattr(self.conf.model, 'future_conditioning', False):
+            elif getattr(self.conf.model, 'future_conditioning', False) or self.conf.model.reduction_factor > 1:
                 # sample tokens for each future head
                 merge_tokens = []
-                for k in range(self.conf.model.extra_future_tokens):
+                for k in range(split_size):
                     chunk_logits = aux_output_chunk[k][:, -1]
                     tok = self.sample_from_logits(chunk_logits, topk=topk, topp=topp, temperature=token_temperature,
                                                   penalize_silence=penalize_silence, penalize_weight=penalize_weight)
                     merge_tokens.append(tok)
-                    if k == 0:
-                        is_stop_token = tok.squeeze(dim=1) == eos_aux_token if eos_aux_token is not None else torch.zeros(batch_size, dtype=torch.bool, device=device)
-                        end_at_this_step = is_stop_token & (stop_steps == 0)
+                if getattr(self.conf.model, "extra_future_tokens", 1) > 1:
+                    tok = merge_tokens[0]
+                    is_stop_token = tok.squeeze(dim=1) == eos_aux_token
+                    end_at_this_step = is_stop_token & (stop_steps == 0)
+                elif self.conf.model.reduction_factor > 1:
+                    is_stop_token = torch.zeros(batch_size, dtype=torch.bool, device=device)
+                    for tok in merge_tokens:
+                        is_stop_token |= tok.squeeze(dim=1) == eos_aux_token
+                    end_at_this_step = is_stop_token & (stop_steps == 0)
                 tokens = torch.stack(merge_tokens, dim=2)
 
             stop_steps[end_at_this_step] = step
@@ -134,12 +145,12 @@ class Sampler(torch.nn.Module):
 
             # Prepare z for the flow model
             if getattr(self.conf.model, "token_conditioning", False):
-                tokens_without_eos = tokens.clone()
-                # guard for missing special token embedding
-                if not getattr(self.conf.model, "add_special_token_to_embedding_table", False):
-                    tokens_without_eos[tokens >= 2048] = 2047
-                token_embed = self.gslm_pipeline.token_embed(tokens_without_eos)
-                if getattr(self.conf.model, "future_conditioning", False):
+                #tokens_without_eos = tokens.clone()
+                ## guard for missing special token embedding
+                #if not getattr(self.conf.model, "add_special_token_to_embedding_table", False):
+                #    tokens_without_eos[tokens >= 2048] = 2047
+                token_embed = self.gslm_pipeline.token_embed(tokens)
+                if getattr(self.conf.model, "future_conditioning", False) or self.conf.model.reduction_factor > 1:
                     token_embed = torch.flatten(token_embed, start_dim=2, end_dim=-1)
                 z = torch.cat([logits[:, -1:, :], token_embed], dim=2)
             else:
