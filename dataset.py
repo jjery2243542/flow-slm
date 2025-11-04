@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from torch.utils.data import Dataset, DataLoader
 import lightning.pytorch as pl
 from datasets import concatenate_datasets
@@ -8,6 +9,7 @@ from utils import batch_pad_right
 import random
 import torch
 from typing import Optional, Tuple, List, Sequence
+from transformers import AutoTokenizer
 
 random.seed(0)
 
@@ -30,15 +32,17 @@ class SpeechDataModule(pl.LightningDataModule):
                 raise ValueError(f"{self.args.training_data} is not supported")
 
             vad = getattr(self.conf.data, "vad", False)
+            use_text = getattr(self.conf.data, "use_text", False)
+            
 
             if self.args.training_data == "MLSEn+people":
-                mls_train_set = HFListDataset(kind="mls", size=size, split="train", vad=vad)
-                people_train_set = HFListDataset(kind="people", split="train")
+                mls_train_set = HFListDataset(kind="mls", size=size, split="train", vad=vad, use_text=use_text)
+                people_train_set = HFListDataset(kind="people", split="train", use_text=use_text)
                 self.train_set = torch.utils.data.ConcatDataset([mls_train_set, people_train_set])
             else:
-                self.train_set = HFListDataset(kind="mls", size=size, split="train", vad=vad)
+                self.train_set = HFListDataset(kind="mls", size=size, split="dev", vad=vad, use_text=use_text)
 
-            self.val_set = HFListDataset(kind="mls", size=size, split="dev", vad=vad)
+            self.val_set = HFListDataset(kind="mls", size=size, split="dev", vad=vad, use_text=use_text)
 
         if stage in ("predict", "test"):
             self.test_set = SpeechDataset(self.args.predict_id_file, self.args.data_dir,
@@ -75,12 +79,13 @@ class HFListDataset(Dataset):
 
     def __init__(self, kind: str = "mls", size: str = "full", pad_audio: bool = False,
                  reduction: int = 4, sort: bool = False, split: str = "train",
-                 vad: bool = False):
+                 vad: bool = False, use_text: bool = False):
         super().__init__()
         self.kind = kind
         self.vad = vad
         self.sort = sort
         self.split = split
+        self.use_text = use_text
 
         if kind == "people":
             datasets = [load_dataset("MLCommons/peoples_speech", subset, split=split)
@@ -124,15 +129,26 @@ class HFListDataset(Dataset):
 
     def __getitem__(self, index: int) -> Tuple[str, torch.Tensor]:
         row = self.dataset[index]
-        wav = torch.tensor(row["audio"]["array"], dtype=torch.float32)
-
-        wav = self._apply_vad(wav)
 
         if self.kind == "people":
             uid = f"people_{row['id']}"
         else:
             uid = f"{row['original_path']}_{row['begin_time']}_{row['end_time']}_{row['book_id']}_{row['speaker_id']}"
-        return uid, wav
+
+        wav = torch.tensor(row["audio"]["array"], dtype=torch.float32)
+        if self.vad:
+            wav = self._apply_vad(wav)
+
+        if self.use_text:
+            if self.kind == "people":
+                text = row["text"]
+            else:
+                text = row["transcript"]
+
+        if self.use_text:
+            return uid, wav, text
+        else:
+            return uid, wav
 
 
 class SpeechDataset(Dataset):
@@ -142,7 +158,7 @@ class SpeechDataset(Dataset):
     """
 
     def __init__(self, id_file: str, data_dir: str, default_sr: int = 16000,
-                 ext: str = "wav"):
+                 ext: str = "wav", use_text: bool = False):
         self.default_sr = default_sr
         self.data_dir = data_dir
 
@@ -164,10 +180,15 @@ class SpeechDataset(Dataset):
             wav = torchaudio.functional.resample(wav, sr, self.default_sr)
         return uid, wav
 
-
 class Collator:
-    def __init__(self):
-        pass
+    def __init__(self, use_text: bool = False):
+        self.use_text = use_text
+        if self.use_text:
+            self.collate_fn = self.wav_text_collate_fn
+            self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True)
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        else:
+            self.collate_fn = self.wav_collate_fn
 
     def wav_collate_fn(self, batch: Sequence[Tuple[str, torch.Tensor]]):
         ids = [entry[0] for entry in batch]
@@ -175,11 +196,37 @@ class Collator:
         wavs, wav_len = batch_pad_right(wavs)
         return ids, wavs, wav_len
 
+    def wav_text_collate_fn(self, batch: Sequence[Tuple[str, torch.Tensor, str]]):
+        """Collate function for datasets that return (id, wav, text).
+
+        Returns: ids, wavs, wav_len, texts (list of str)
+        """
+        ids = [entry[0] for entry in batch]
+        wavs = [entry[1] for entry in batch]
+        texts = [entry[2] for entry in batch]
+
+        wavs, wav_len = batch_pad_right(wavs)
+        tokenized = self.tokenizer(
+            text=texts, 
+            padding=True, 
+            return_tensors="pt", 
+            return_attention_mask=True, 
+            add_special_tokens=False, 
+            truncation=True, 
+            max_length=512,
+        )
+        text_input_ids = tokenized.input_ids
+        attention_mask = tokenized.attention_mask
+
+        return ids, wavs, wav_len, text_input_ids, attention_mask
+
 
 def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool = True, batch_sampler=None,
-                   drop_last: bool = True, num_workers: int = 0, prefetch_factor: Optional[int] = 2) -> DataLoader:
-    collator = Collator()
-    collate_fn = collator.wav_collate_fn
+                   drop_last: bool = True, num_workers: int = 0, prefetch_factor: Optional[int] = 2,
+                   collate_fn: Optional[Callable] = None) -> DataLoader:
+    collator = Collator(use_text=isinstance(dataset, HFListDataset) and dataset.use_text)
+    if collate_fn is None:
+        collate_fn = collator.collate_fn
 
     if batch_sampler is None:
         data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
@@ -190,4 +237,3 @@ def get_dataloader(dataset: Dataset, batch_size: int, shuffle: bool = True, batc
                                  num_workers=num_workers, collate_fn=collate_fn,
                                  pin_memory=True, prefetch_factor=prefetch_factor)
     return data_loader
-

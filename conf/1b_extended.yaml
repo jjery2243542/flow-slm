@@ -31,7 +31,7 @@ optimizer:
   token_loss_weight: 1.0
   sigma_min: 1.0E-5
   t_dist: logit_normal
-  percentile_clipping: 80
+  percentile_clipping: 60
 
 data:
     sr: 16000

@@ -78,6 +78,8 @@ class Sampler(torch.nn.Module):
                solver: str = "euler",
                eos_aux_token: Optional[int] = None,
                cfg_scale: float = 0.3,
+               schedule: str = "linear",
+               shift_alpha: float = 1.0,
                topk: Optional[int] = None,
                topp: Optional[float] = 0.95,
                penalize_silence: bool = False,
@@ -157,7 +159,7 @@ class Sampler(torch.nn.Module):
                 z = logits[:, -1:, :]
 
             # Sample from the flow model (single call). capture norms if the flow returns them
-            samples = self.flow_loss.sample(z, steps=ode_steps, temperature=temperature, solver=solver, cfg_scale=cfg_scale)
+            samples = self.flow_loss.sample(z, steps=ode_steps, temperature=temperature, solver=solver, cfg_scale=cfg_scale, schedule=schedule, shift_alpha=shift_alpha)
             prev_tokens = torch.cat([prev_tokens, samples.to(prev_tokens.dtype)], dim=1)
 
         if not has_ended.all():

@@ -39,7 +39,7 @@ class FlowLoss(nn.Module):
         loss = F.mse_loss(out, u, reduction='none')
         return loss
 
-    def sample(self, z, x=None, steps=100, temperature=1.0, schedule="linear", truncation=1.0, solver="euler", cfg_scale=0.0, time_shift_alpha=2.0):
+    def sample(self, z, x=None, steps=100, temperature=1.0, schedule="linear", truncation=1.0, solver="euler", cfg_scale=0.0, shift_alpha=2.0):
         if x is None:
             x = torch.randn(z.shape[0], z.shape[1], self.target_dim, device=z.device, dtype=z.dtype)
 
@@ -52,7 +52,7 @@ class FlowLoss(nn.Module):
             t_span = torch.linspace(0, 1, steps + 1, device=z.device, dtype=z.dtype)
         elif schedule == "shifted_linear":
             t_span = torch.linspace(0, 1, steps + 1, device=z.device, dtype=z.dtype)
-            t_span = (t_span * time_shift_alpha) / (1 + (time_shift_alpha - 1) * t_span)
+            t_span = (t_span * shift_alpha) / (1 + (shift_alpha - 1) * t_span)
         else:
             raise NotImplementedError(f"schedule {schedule} not implemented")
 

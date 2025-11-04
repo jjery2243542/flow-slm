@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 import lightning.pytorch as pl
 from utils import get_cosine_schedule_with_warmup
-from pipeline import GSLMPipeline
+from pipeline import GSLMPipeline, GSLMWithTextPipeline
 from losses import FlowLoss
 import argparse
 import os
@@ -39,7 +39,10 @@ class LanguageModeling(pl.LightningModule):
         conf_dict = self.conf.toDict()
         self.save_hyperparameters(conf_dict)
 
-        self.gslm_pipeline = GSLMPipeline(conf, args)
+        if self.conf.model.get("use_text", False):
+            self.gslm_pipeline = GSLMWithTextPipeline(conf, args)
+        else:
+            self.gslm_pipeline = GSLMPipeline(conf, args)
 
         # build loss_fn (FlowLoss) depending on config
         if self.conf.optimizer.loss_function == "FM":
@@ -71,6 +74,8 @@ class LanguageModeling(pl.LightningModule):
 
         if not hasattr(self.conf.optimizer, "loss_weight"):
             self.conf.optimizer.loss_weight = 1.0
+        if not hasattr(self.conf.optimizer, "text_loss_weight"):
+            self.conf.optimizer.text_loss_weight = 0.0
 
     def configure_optimizers(self):
         trainable_params = filter(lambda p: p.requires_grad, self.parameters())
@@ -113,7 +118,15 @@ class LanguageModeling(pl.LightningModule):
         }
         return lr_scheduler_config
 
-    def _run_pipeline(self, wavs: torch.Tensor, wav_len: torch.Tensor, eval_mode: bool):
+    def _run_pipeline(
+        self,
+        wavs: torch.Tensor,
+        wav_len: torch.Tensor,
+        eval_mode: bool,
+        text_input_ids: torch.Tensor = None,
+        text_attention_mask: torch.Tensor = None,
+        shift_audio_prediction: int = 2,
+    ):
         """
         Call the pipeline. If eval_mode is True, temporarily set pipeline.eval()
         and restore previous training flag after call.
@@ -122,12 +135,24 @@ class LanguageModeling(pl.LightningModule):
             was_training = self.gslm_pipeline.training
             self.gslm_pipeline.eval()
             with torch.no_grad():
-                out = self.gslm_pipeline(wavs, wav_len)
+                out = self.gslm_pipeline(
+                    wavs,
+                    wav_len,
+                    text_input_ids=text_input_ids,
+                    text_attention_mask=text_attention_mask,
+                    shift_audio_prediction=shift_audio_prediction,
+                )
             if was_training:
                 self.gslm_pipeline.train()
             return out
         else:
-            return self.gslm_pipeline(wavs, wav_len)
+            return self.gslm_pipeline(
+                wavs,
+                wav_len,
+                text_input_ids=text_input_ids,
+                text_attention_mask=text_attention_mask,
+                shift_audio_prediction=shift_audio_prediction,
+            )
 
     def _compute_flow_loss(self, logits, ssl_feats):
         """Compute flow loss or return zeros if disabled."""
@@ -166,16 +191,38 @@ class LanguageModeling(pl.LightningModule):
 
         return final_token_loss
 
-    def _compute_metrics_and_total(self, flow_loss, padding_mask, token_loss, token_padding_mask, token_logits, tokens):
+    def _compute_text_loss(self, text_logits, text_targets):
+        if self.conf.optimizer.text_loss_weight <= 0 or text_logits is None or text_targets is None:
+            return None
+        final_text_loss = self.token_loss_fn(text_logits.reshape(-1, text_logits.shape[-1]), text_targets.reshape(-1)).reshape(text_logits.shape[0], text_logits.shape[1])
+        return final_text_loss
+
+    def _compute_metrics_and_total(
+        self,
+        flow_loss,
+        padding_mask,
+        token_loss,
+        token_padding_mask,
+        token_logits,
+        tokens,
+        text_loss,
+        text_padding_mask,
+    ):
         flow_loss_val = torch.sum(flow_loss * padding_mask) / (torch.sum(padding_mask) * self.conf.model.reduction_factor * self.conf.model.ssl_dim)
         if token_loss is not None:
             token_loss_val = torch.sum(token_loss * token_padding_mask) / torch.sum(token_padding_mask)
         else:
             token_loss_val = None
+        if text_loss is not None:
+            text_loss_val = torch.sum(text_loss * text_padding_mask) / torch.sum(text_padding_mask)
+        else:
+            text_loss_val = None
 
         total_loss = self.conf.optimizer.loss_weight * flow_loss_val
         if token_loss_val is not None:
             total_loss = total_loss + self.conf.optimizer.token_loss_weight * token_loss_val
+        if text_loss_val is not None:
+            total_loss = total_loss + self.conf.optimizer.text_loss_weight * text_loss_val
 
         # token accuracies for all future-token predictions
         token_accs = None
@@ -190,31 +237,69 @@ class LanguageModeling(pl.LightningModule):
         else:
             token_acc = None
 
-        return total_loss, flow_loss_val, token_loss_val, token_acc
+        return total_loss, flow_loss_val, token_loss_val, token_acc, text_loss_val
 
-    def forward(self, batch, reduction='token'):
-        ids, wavs, wav_len = batch
+    def forward(self, batch, reduction="token"):
+        if self.conf.data.get("use_text", False):
+            ids, wavs, wav_len, text_input_ids, text_attention_mask = batch
+        else:
+            ids, wavs, wav_len = batch
+            text_input_ids, text_attention_mask = None, None
+
         wav_len = wav_len.float()
 
         # run pipeline (use eval mode for non-training forward)
         eval_mode = not self.training
-        logits, ssl_feats, padding_mask, token_logits, tokens, token_padding_mask = self._run_pipeline(wavs, wav_len, eval_mode)
+        pipeline_out = self._run_pipeline(
+            wavs,
+            wav_len,
+            eval_mode,
+            text_input_ids=text_input_ids,
+            text_attention_mask=text_attention_mask,
+            shift_audio_prediction=self.conf.model.shift_audio_prediction,
+        )
+
+        if self.conf.data.get("use_text", False):
+            (
+                logits,
+                ssl_feats,
+                padding_mask,
+                token_logits,
+                tokens,
+                token_padding_mask,
+                text_logits,
+                text_targets,
+                text_padding_mask,
+            ) = pipeline_out
+        else:
+            logits, ssl_feats, padding_mask, token_logits, tokens, token_padding_mask = pipeline_out
+            text_logits = text_targets = text_padding_mask = None
 
         flow_loss = self._compute_flow_loss(logits, ssl_feats)
+        # non-training mode is used when evaluate zerospeech
         token_loss = self._compute_token_loss(token_logits, tokens, token_padding_mask, self.training)
+        text_loss = self._compute_text_loss(text_logits, text_targets)
+        text_loss_val = None
 
         if reduction == "token":
-            total_loss, flow_loss_val, token_loss_val, token_acc = self._compute_metrics_and_total(
-                flow_loss, padding_mask, token_loss, token_padding_mask, token_logits, tokens,
+            total_loss, flow_loss_val, token_loss_val, token_acc, text_loss_val = self._compute_metrics_and_total(
+                flow_loss,
+                padding_mask,
+                token_loss,
+                token_padding_mask,
+                token_logits,
+                tokens,
+                text_loss,
+                text_padding_mask,
             )
-            return total_loss, flow_loss_val, token_loss_val, token_acc
-        
-        elif reduction == "token_seq":
+            return total_loss, flow_loss_val, token_loss_val, token_acc, text_loss_val
+
+        if reduction == "token_seq":
             flow_loss_val = flow_loss
             if token_loss is not None:
                 token_loss_val = token_loss
-            else:
-                token_loss_val = None
+            if text_loss is not None:
+                text_loss_val = text_loss
 
         elif reduction == "utterance":
             flow_loss_val = (torch.sum(flow_loss * padding_mask, dim=1) / torch.sum(padding_mask, dim=1)).mean(dim=1)
@@ -225,19 +310,27 @@ class LanguageModeling(pl.LightningModule):
                     L = token_padding_mask.shape[1]
                     token_padding_mask = token_padding_mask * (tokens[:, :L].squeeze(dim=2) != eos_index)
                 token_loss_val = torch.sum(token_loss * token_padding_mask, dim=1) / torch.sum(token_padding_mask, dim=1)
+            if text_loss is not None:
+                denom = torch.sum(text_padding_mask, dim=1)
+                denom = torch.clamp(denom, min=1.0)
+                text_loss_val = torch.sum(text_loss * text_padding_mask, dim=1) / denom
 
         elif reduction == "unnormalized_utterance":
             flow_loss_val = torch.sum(flow_loss * padding_mask, dim=1).sum(dim=1)
             if token_loss is not None:
                 token_loss_val = torch.sum(token_loss * token_padding_mask, dim=1)
+            if text_loss is not None:
+                text_loss_val = torch.sum(text_loss * text_padding_mask, dim=1)
+        else:
+            raise ValueError(f"Unknown reduction mode {reduction}")
 
         total_loss = None  # not used in non-token reduction modes
         token_acc = None  # not used in non-token reduction modes
 
-        return total_loss, flow_loss_val, token_loss_val, token_acc
+        return total_loss, flow_loss_val, token_loss_val, token_acc, text_loss_val
 
     def training_step(self, batch, batch_idx):
-        total_loss, flow_loss_val, token_loss, token_acc = self.forward(batch)
+        total_loss, flow_loss_val, token_loss, token_acc, text_loss = self.forward(batch)
         current_lr = self.optimizers().param_groups[0]["lr"]
         if torch.isnan(total_loss):
             print("nan detected! skip this batch")
@@ -246,21 +339,25 @@ class LanguageModeling(pl.LightningModule):
         if token_loss is not None:
             self.log("train/token_loss", token_loss, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
             self.log("train/token_acc", token_acc, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
+        if text_loss is not None:
+            self.log("train/text_loss", text_loss, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
         self.log("train/lr", current_lr, on_step=True, on_epoch=False, logger=True, sync_dist=True)
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        total_loss, flow_loss_val, token_loss, token_acc = self.forward(batch)
+        total_loss, flow_loss_val, token_loss, token_acc, text_loss = self.forward(batch)
         self.log("valid/flow_loss", flow_loss_val, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         if token_loss is not None:
             self.log("valid/token_loss", token_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             self.log("valid/token_acc", token_acc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        if text_loss is not None:
+            self.log("valid/text_loss", text_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         return total_loss
 
     def predict_step(self, batch, batch_idx):
         with torch.enable_grad():
-            ids, wavs, wav_len = batch
-            total_loss, flow_loss_val, token_loss, token_acc = self.forward(batch, reduction=self.args.reduction)
+            ids = batch[0]
+            total_loss, flow_loss_val, token_loss, token_acc, text_loss = self.forward(batch, reduction=self.args.reduction)
 
         if token_loss is not None:
             return ids, -flow_loss_val, -token_loss
@@ -268,12 +365,15 @@ class LanguageModeling(pl.LightningModule):
             return ids, -flow_loss_val
 
     def test_step(self, batch, batch_idx):
-        total_loss, flow_loss_val, token_loss, token_acc = self.forward(batch, reduction="token")
+        total_loss, flow_loss_val, token_loss, token_acc, text_loss = self.forward(batch, reduction="token")
         self.log("test/loss", flow_loss_val, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         if token_loss is not None:
             self.log("test/token_loss", token_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
             self.log("test/token_acc", token_acc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        return total_loss, token_loss, token_acc
+        if text_loss is not None:
+            self.log("test/text_loss", text_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        return total_loss, token_loss, token_acc, text_loss
+
 def main():
     parser = argparse.ArgumentParser(description="")
     parser.add_argument("--data_dir", help="Path to dataset folder", default=None)

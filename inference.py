@@ -173,7 +173,6 @@ def load_model(args, conf, device="cuda"):
     state_dict = torch.load(args.ckpt_path, map_location="cpu")
     lm.load_state_dict(state_dict)
     lm = lm.to(device).to(torch.bfloat16)
-    print(lm)
     return lm
 
 
@@ -198,8 +197,24 @@ def run_unconditional(args, sampler, processor):
         cur_bs = min(batch_size, samples_to_generate - generated)
         with torch.no_grad():
             # eos_token is set to the last token id if token loss is used
-            eos_aux_token = codec_size + processor.conf.model.n_special_tokens - 1 if getattr(processor.conf.optimizer, "token_loss_weight", 0) > 0 else None
-            samples, stop_steps = sampler.sample(batch_size=cur_bs, min_len=args.min_len, max_len=args.max_len, ode_steps=args.ode_steps, token_temperature=args.token_temperature, temperature=args.temperature, solver=args.solver, eos_aux_token=eos_aux_token, cfg_scale=args.cfg_scale, topk=args.topk, topp=args.topp, penalize_silence=args.penalize_silence, penalize_weight=args.penalize_weight)
+            eos_aux_token = codec_size + processor.conf.model.n_special_tokens - 1 
+            samples, stop_steps = sampler.sample(
+                batch_size=cur_bs,
+                min_len=args.min_len,
+                max_len=args.max_len,
+                ode_steps=args.ode_steps,
+                token_temperature=args.token_temperature,
+                temperature=args.temperature,
+                solver=args.solver,
+                eos_aux_token=eos_aux_token,
+                cfg_scale=args.cfg_scale,
+                topk=args.topk,
+                topp=args.topp,
+                penalize_silence=args.penalize_silence,
+                penalize_weight=args.penalize_weight,
+                schedule=args.schedule,
+                shift_alpha=args.shift_alpha,
+            )
 
         samples = processor.unmerge_and_unnormalize(samples)
         wavs = processor.batch_vocoding(samples, stop_steps, args.num_quantizers)
@@ -217,7 +232,24 @@ def run_conditional(args, sampler, processor, prompt_wavs):
         for batch_idx in range(args.samples_per_prompt // args.batch_size):
             with torch.no_grad():
                 eos_aux_token = codec_size + processor.conf.model.n_special_tokens - 1 if getattr(processor.conf.optimizer, "token_loss_weight", 0) > 0 else None
-                samples, stop_steps = sampler.sample(batch_size=args.batch_size, min_len=args.min_len, max_len=args.max_len, ode_steps=args.ode_steps, token_temperature=args.token_temperature, temperature=args.temperature, prompts=reduced_feats, solver=args.solver, eos_aux_token=eos_aux_token, cfg_scale=args.cfg_scale, topk=args.topk, topp=args.topp, penalize_silence=args.penalize_silence, penalize_weight=args.penalize_weight)
+                samples, stop_steps = sampler.sample(
+                    batch_size=args.batch_size,
+                    min_len=args.min_len,
+                    max_len=args.max_len,
+                    ode_steps=args.ode_steps,
+                    token_temperature=args.token_temperature,
+                    temperature=args.temperature,
+                    prompts=reduced_feats,
+                    solver=args.solver,
+                    eos_aux_token=eos_aux_token,
+                    cfg_scale=args.cfg_scale,
+                    topk=args.topk,
+                    topp=args.topp,
+                    penalize_silence=args.penalize_silence,
+                    penalize_weight=args.penalize_weight,
+                    schedule=args.schedule,
+                    shift_alpha=args.shift_alpha,
+                )
 
             samples = processor.unmerge_and_unnormalize(samples)
             wavs = processor.batch_vocoding(samples, stop_steps, args.num_quantizers)
