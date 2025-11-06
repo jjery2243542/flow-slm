@@ -26,7 +26,7 @@ class GSLMPipeline(nn.Module):
 
         attn_implementation = "flash_attention_2" if self.conf.model.flash_attention else "eager"
         torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() or attn_implementation == 'flash_attention_2' else torch.float32
-        self._decoder_model = AutoModelForCausalLM.from_pretrained(
+        decoder_model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch_dtype,
             trust_remote_code=True
@@ -35,10 +35,14 @@ class GSLMPipeline(nn.Module):
         # Initialize normalization (moved to helper)
         self._init_normalization()
         # Initialize remaining model components (moved to helper)
-        self._init_model_components()
+        self._init_model_components(decoder_model)
 
         # Initialize embeddings (moved to helper)
         self._init_embeddings()
+
+    @property
+    def _decoder_model(self):
+        return self.decoder.lm
 
     def _init_normalization(self):
         """Load and register static normalization buffers if configured.
@@ -51,7 +55,7 @@ class GSLMPipeline(nn.Module):
             std = np.load(self.conf.model.std_path)
             self.register_buffer('std', torch.from_numpy(std).float())
     
-    def _init_model_components(self):
+    def _init_model_components(self, decoder_model):
         """Initialize dims, aux outputs, decoder wrapper and related model components."""
         ssl_dim, reduction_factor = self.conf.model.ssl_dim, self.conf.model.reduction_factor
         if self.conf.optimizer.loss_function == "FM":
@@ -88,7 +92,7 @@ class GSLMPipeline(nn.Module):
 
             if hasattr(self.conf.model, "ssl_model") and self.conf.model.ssl_model == "mimi":
                 self.decoder = ELMDecoderWrapper(
-                    self._decoder_model,
+                    decoder_model,
                     input_dim=self.input_dim,
                     decoder_dim=self.conf.model.decoder_dim,
                     output_dim=self.output_dim,
@@ -98,10 +102,10 @@ class GSLMPipeline(nn.Module):
                     aux_output_layer_idx=self.aux_output_layer_idx,
                     token_emb_dim=self.token_emb_dim,
                 )
-            # use self._decoder_model for config access
-            self.pad_index = self._decoder_model.config.pad_token_id
-            self.bos_index = self._decoder_model.config.bos_token_id
-            self.eos_index = self._decoder_model.config.eos_token_id
+            # use self._lm for config access
+            self.pad_index = decoder_model.config.pad_token_id
+            self.bos_index = decoder_model.config.bos_token_id
+            self.eos_index = decoder_model.config.eos_token_id
 
     def _init_embeddings(self):
         """Create embedding layers (input BOS embedding and optional token embeddings)."""
@@ -315,12 +319,12 @@ class GSLMWithTextPipeline(GSLMPipeline):
             text_attention_mask=text_attention_mask_w_bos if text_attention_mask is not None else None,
             **decoder_kwargs,
         )
+
+        start = shift_audio_prediction if shift_audio_prediction >= 0 else 0
+        length = reduced_ssl_feats.shape[1]
         # Remove the last frame because there is no loss applied on it (eos token)
-        if shift_audio_prediction > 0:
-            logits = logits[:, shift_audio_prediction:-1]
-            aux_output = aux_output[:, shift_audio_prediction:]
-        else:
-            logits = logits[:, :-1]
+        logits = logits[:, start:start + length]
+        aux_output = aux_output[:, start:start + length + 1]
 
         # Process token predictions (delegated to helper)
         token_logits, tokens, split_padding_mask = self._process_token_predictions(aux_output, wav_len, tokens, bs)

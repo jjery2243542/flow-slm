@@ -331,7 +331,7 @@ class ELMDecoderWrapper(BaseDecoderWrapper):
 
 	def __init__(
 		self,
-		elm,
+		lm,
 		input_dim: int,
 		decoder_dim: int,
 		output_dim: int,
@@ -341,8 +341,9 @@ class ELMDecoderWrapper(BaseDecoderWrapper):
 		aux_output_layer_idx: Optional[int] = None,
 		token_emb_dim: int = 0
 	):
-		super().__init__(elm, input_dim, decoder_dim, output_dim, aux_output_dim, output_layer, n_res_blocks, aux_output_layer_idx, token_emb_dim)
-		self.decoder = elm.transformer
+		super().__init__(lm, input_dim, decoder_dim, output_dim, aux_output_dim, output_layer, n_res_blocks, aux_output_layer_idx, token_emb_dim)
+		self.lm = lm
+		self.decoder = lm.transformer
 
 	def forward(
 		self,
@@ -415,7 +416,7 @@ class ELMDecoderWrapperWithText(BaseDecoderWrapper):
 
 	def __init__(
 		self,
-		elm,
+		lm,
 		input_dim: int,
 		decoder_dim: int,
 		output_dim: int,
@@ -426,22 +427,22 @@ class ELMDecoderWrapperWithText(BaseDecoderWrapper):
 		token_emb_dim: int = 0,
 		freeze_input_output_layer: bool = False, 
 	):
-		super().__init__(elm, input_dim, decoder_dim, output_dim, aux_output_dim, output_layer, n_res_blocks, aux_output_layer_idx, token_emb_dim)
+		super().__init__(lm, input_dim, decoder_dim, output_dim, aux_output_dim, output_layer, n_res_blocks, aux_output_layer_idx, token_emb_dim)
 		# Keep reference to the high-level ELM model so we can access its embeddings and output head
-		self.elm = elm
-		self.decoder = elm.transformer
+		self.lm = lm
+		self.decoder = lm.transformer
 
 		# Input token embedding module from the original ELM model
 		# (expected to be an nn.Embedding)
-		self.elm_token_embeddings = elm.get_input_embeddings()
-		if self.elm.config.share_input_output_layers:
-			self.text_output_proj = torch.nn.Linear(self.elm_token_embeddings.weight.size(1), self.elm_token_embeddings.weight.size(0), bias=False)
-			self.text_output_proj.weight = self.elm_token_embeddings.weight
+		self.lm_token_embeddings = lm.get_input_embeddings()
+		if self.lm.config.share_input_output_layers:
+			self.text_output_proj = torch.nn.Linear(self.lm_token_embeddings.weight.size(1), self.lm_token_embeddings.weight.size(0), bias=False)
+			self.text_output_proj.weight = self.lm_token_embeddings.weight
 		else:
-			self.text_output_proj = elm.lm_head
+			self.text_output_proj = lm.lm_head
 
 		if freeze_input_output_layer:
-			for param in self.elm_token_embeddings.parameters():
+			for param in self.lm_token_embeddings.parameters():
 				param.requires_grad = False
 			for param in self.text_output_proj.parameters():
 				param.requires_grad = False
@@ -453,7 +454,7 @@ class ELMDecoderWrapperWithText(BaseDecoderWrapper):
 		attention_mask: Optional[torch.Tensor] = None,
 		cache_position: Optional[torch.Tensor] = None,
 		text_attention_mask: Optional[torch.Tensor] = None,
-		shift_audio_prediction: int = 2,
+		shift_audio_prediction: int = 0,
 	):
 		"""Forward pass that accepts an extra text input and returns text logits.
 
@@ -473,7 +474,7 @@ class ELMDecoderWrapperWithText(BaseDecoderWrapper):
 
 		# compute text conditioning embeddings aligned with the main sequence and add
 		if text_input_ids is not None:
-			text_emb = self.elm_token_embeddings(text_input_ids)
+			text_emb = self.lm_token_embeddings(text_input_ids)
 
 			# masking the padding tokens from embeddings
 			if text_attention_mask is not None:
@@ -499,8 +500,6 @@ class ELMDecoderWrapperWithText(BaseDecoderWrapper):
 				pad_len = text_len - target_len
 				pad = torch.zeros(inputs_embeds.size(0), pad_len, inputs_embeds.size(2), dtype=text_emb.dtype, device=text_emb.device)
 				inputs_embeds = torch.cat([inputs_embeds, pad], dim=1)
-			else:
-				raise ValueError("text_input_ids length must be less than or equal to input_tokens length")
 			
 			inputs_embeds = inputs_embeds + text_emb
 
@@ -548,12 +547,15 @@ class ELMDecoderWrapperWithText(BaseDecoderWrapper):
 			aux_output = self.aux_output_proj(aux_hidden_states)
 		else:
 			aux_output = None
-		text_logits = self.text_output_proj(hidden_states)
-		text_length = text_attention_mask.size(1) 
+		
+		if text_input_ids is not None:
+			text_logits = self.text_output_proj(hidden_states)
+			text_length = text_attention_mask.size(1) 
 
-		if shift_audio_prediction >= 0:
-			text_logits = text_logits[:, :text_length, :]
+			if shift_audio_prediction >= 0:
+				text_logits = text_logits[:, :text_length, :]
+			else:
+				text_logits = text_logits[:, -shift_audio_prediction:text_length - shift_audio_prediction, :]
+			return logits, aux_output, text_logits
 		else:
-			text_logits = text_logits[:, -shift_audio_prediction:text_length - shift_audio_prediction, :]
-
-		return logits, aux_output, text_logits
+		    return logits, aux_output

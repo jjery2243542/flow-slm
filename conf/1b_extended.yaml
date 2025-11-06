@@ -2,7 +2,7 @@ model:
   freeze: True
   ssl_model: "mimi"
   n_quantizers: 1 # only use semantic token
-  decoder: "OpenELM-1B"
+  decoder: "OpenELM-1_1B"
   flash_attention: True
   ssl_dim: 512
   decoder_dim: 2048

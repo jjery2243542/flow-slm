@@ -40,7 +40,7 @@ class SpeechDataModule(pl.LightningDataModule):
                 people_train_set = HFListDataset(kind="people", split="train", use_text=use_text)
                 self.train_set = torch.utils.data.ConcatDataset([mls_train_set, people_train_set])
             else:
-                self.train_set = HFListDataset(kind="mls", size=size, split="dev", vad=vad, use_text=use_text)
+                self.train_set = HFListDataset(kind="mls", size=size, split="train", vad=vad, use_text=use_text)
 
             self.val_set = HFListDataset(kind="mls", size=size, split="dev", vad=vad, use_text=use_text)
 

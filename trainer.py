@@ -125,7 +125,7 @@ class LanguageModeling(pl.LightningModule):
         eval_mode: bool,
         text_input_ids: torch.Tensor = None,
         text_attention_mask: torch.Tensor = None,
-        shift_audio_prediction: int = 2,
+        shift_audio_prediction: int = 0,
     ):
         """
         Call the pipeline. If eval_mode is True, temporarily set pipeline.eval()
@@ -250,13 +250,14 @@ class LanguageModeling(pl.LightningModule):
 
         # run pipeline (use eval mode for non-training forward)
         eval_mode = not self.training
+        shift_audio_prediction = self.conf.model.get("shift_audio_prediction", 0)
         pipeline_out = self._run_pipeline(
             wavs,
             wav_len,
             eval_mode,
             text_input_ids=text_input_ids,
             text_attention_mask=text_attention_mask,
-            shift_audio_prediction=self.conf.model.shift_audio_prediction,
+            shift_audio_prediction=shift_audio_prediction,
         )
 
         if self.conf.data.get("use_text", False):
