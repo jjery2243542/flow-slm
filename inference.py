@@ -2,7 +2,7 @@ import argparse
 import csv
 from pathlib import Path
 import tqdm
-
+from transformers import AutoTokenizer
 import lightning.pytorch as pl
 import munch
 import numpy as np
@@ -36,7 +36,7 @@ class WhisperWrapper:
         return result
 
 
-def load_audio_list(root_dir: str, csv_path: str, target_sample_rate: int):
+def load_audio_list(root_dir: str, csv_path: str, target_sample_rate: int, load_text: bool = False):
     data = []
     root_dir = Path(root_dir)
     with open(csv_path, "r") as csvfile:
@@ -48,8 +48,13 @@ def load_audio_list(root_dir: str, csv_path: str, target_sample_rate: int):
             if sample_rate != target_sample_rate:
                 waveform = torchaudio.transforms.Resample(sample_rate, target_sample_rate)(waveform)
             prompt_id = row["path"].replace("/", "_").replace(".wav", "").replace(".flac", "")
-            data.append((prompt_id, waveform, duration))
 
+            if load_text:
+                text = row["text"]
+            else:
+                text = None
+
+            data.append((prompt_id, waveform, duration, text))
     return data
 
 
@@ -91,6 +96,24 @@ class Processor:
             reduced_feats = reduced_feats.repeat(duplicate, 1, 1)
 
             return reduced_feats
+        
+    def load_text_tokenizer(self):
+        self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def tokenize_text(self, texts):
+        tokenized = self.tokenizer(
+            text=texts, 
+            padding=True, 
+            return_tensors="pt", 
+            return_attention_mask=True, 
+            add_special_tokens=True, # add BOS token 
+            truncation=True, 
+            max_length=512,
+        )
+        text_input_ids = tokenized.input_ids
+        attention_mask = tokenized.attention_mask
+        return text_input_ids.to(self.device), attention_mask.to(self.device)
 
     def load_vocoder_mimi(self):
         self.vocoder_type = "mimi"
@@ -144,6 +167,7 @@ def parse_args():
     parser.add_argument("--penalize_silence", action="store_true")
     parser.add_argument("--penalize_weight", type=float, default=10.0)
     parser.add_argument("--token_temperature", type=float, default=0.8)
+    parser.add_argument("--text_temperature", type=float, default=0.8)
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--cfg_scale", type=float, default=0.3)
     parser.add_argument("--solver", type=str, default="euler")
@@ -156,6 +180,7 @@ def parse_args():
     parser.add_argument("--download_whisper_root", type=str, default=None, help="Root directory to download Whisper models")
     parser.add_argument("--save_transcription", action="store_true")
     parser.add_argument("--num_quantizers", type=int, default=16)
+    parser.add_argument("--use_text_prompt", action="store_true", help="Use text prompts along with audio prompts")
     return parser.parse_args()
 
 
@@ -171,7 +196,7 @@ def load_model(args, conf, device="cuda"):
     model_args = type("Args", (), {})()
     lm = LanguageModeling(model_args, conf)
     state_dict = torch.load(args.ckpt_path, map_location="cpu")
-    lm.load_state_dict(state_dict)
+    lm.load_state_dict(state_dict, strict=True)
     lm = lm.to(device).to(torch.bfloat16)
     return lm
 
@@ -182,13 +207,14 @@ def prepare_sampler_and_processor(lm, conf, args, device="cuda"):
     processor = Processor(conf, device=device)
     processor.load_vocoder_mimi()
     processor.load_ssl_model(lm.gslm_pipeline.ssl_model.to(torch.float32))
-
+    if args.use_text_prompt:
+        processor.load_text_tokenizer()
     return sampler, processor
 
 def save_wav(wav, path, sample_rate):
     torchaudio.save(path, wav.cpu(), sample_rate, backend="soundfile")
 
-def run_unconditional(args, sampler, processor):
+def run_unconditional(args, conf, sampler, processor):
     codec_size = 2048
     samples_to_generate = args.n_samples
     batch_size = args.batch_size
@@ -204,6 +230,7 @@ def run_unconditional(args, sampler, processor):
                 max_len=args.max_len,
                 ode_steps=args.ode_steps,
                 token_temperature=args.token_temperature,
+                text_temperature=args.text_temperature,
                 temperature=args.temperature,
                 solver=args.solver,
                 eos_aux_token=eos_aux_token,
@@ -223,23 +250,33 @@ def run_unconditional(args, sampler, processor):
         generated += cur_bs
 
 
-def run_conditional(args, sampler, processor, prompt_wavs):
+def run_conditional(args, conf, sampler, processor, prompt_wavs):
     codec_size = 2048
-    for prompt_idx, (prompt_id, wav, duration) in enumerate(prompt_wavs):
+    for prompt_idx, (prompt_id, wav, duration, text) in enumerate(prompt_wavs):
         reduced_feats = processor.get_ssl_feats(wav, duration, duplicate=args.batch_size)
         reduced_feats = reduced_feats.to(torch.bfloat16)
+        if args.use_text_prompt:
+            print("use_text run_conditional()")
+            text_ids, text_attention_mask = processor.tokenize_text([text] * args.batch_size)
+        else:
+            text_ids = None
+            text_attention_mask = None
 
         for batch_idx in range(args.samples_per_prompt // args.batch_size):
             with torch.no_grad():
                 eos_aux_token = codec_size + processor.conf.model.n_special_tokens - 1 if getattr(processor.conf.optimizer, "token_loss_weight", 0) > 0 else None
-                samples, stop_steps = sampler.sample(
+                out = sampler.sample(
                     batch_size=args.batch_size,
                     min_len=args.min_len,
                     max_len=args.max_len,
                     ode_steps=args.ode_steps,
+                    text_temperature=args.token_temperature,
+                    use_text_prompt=args.use_text_prompt,
                     token_temperature=args.token_temperature,
                     temperature=args.temperature,
-                    prompts=reduced_feats,
+                    audio_prompts=reduced_feats,
+                    text_prompts=text_ids,
+                    text_attention_mask=text_attention_mask,
                     solver=args.solver,
                     eos_aux_token=eos_aux_token,
                     cfg_scale=args.cfg_scale,
@@ -249,7 +286,13 @@ def run_conditional(args, sampler, processor, prompt_wavs):
                     penalize_weight=args.penalize_weight,
                     schedule=args.schedule,
                     shift_alpha=args.shift_alpha,
+                    shift_audio_prediction=conf.model.shift_audio_prediction,
                 )
+                if not args.use_text_prompt:
+                    samples, stop_steps = out
+                else:
+                    samples, stop_steps, text_input_ids, text_attention_mask = out
+                    #TODO: writing text_input_ids by their lengths from text_attention_mask 
 
             samples = processor.unmerge_and_unnormalize(samples)
             wavs = processor.batch_vocoding(samples, stop_steps, args.num_quantizers)
@@ -286,12 +329,12 @@ def main():
     # load prompt list if provided
     prompt_wavs = None
     if args.prompt_csv is not None and args.prompt_dir is not None:
-        prompt_wavs = load_audio_list(args.prompt_dir, args.prompt_csv, target_sample_rate=16000)
+        prompt_wavs = load_audio_list(args.prompt_dir, args.prompt_csv, target_sample_rate=16000, load_text=args.use_text_prompt)
 
     if prompt_wavs is None:
-        gen_iter = run_unconditional(args, sampler, processor)
+        gen_iter = run_unconditional(args, conf, sampler, processor)
     else:
-        gen_iter = run_conditional(args, sampler, processor, prompt_wavs)
+        gen_iter = run_conditional(args, conf, sampler, processor, prompt_wavs)
 
     for idx, (prompt_id, wav, sr) in enumerate(tqdm.tqdm(gen_iter)):
         if args.save_wav and args.output_dir:

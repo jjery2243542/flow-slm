@@ -4,6 +4,9 @@ from torch import nn
 from losses import FlowLoss
 import torch.nn.functional as F
 from typing import Optional, Tuple
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True)
 
 class Sampler(torch.nn.Module):
     def __init__(self, gslm_pipeline: GSLMPipeline, flow_loss: FlowLoss, frame_rate: int = 12.5, silence_indices: Optional[list] = None):
@@ -69,12 +72,16 @@ class Sampler(torch.nn.Module):
                batch_size: int = 1,
                min_len: float = 10,
                max_len: float = 15,
-               threshold: float = 0.5,
                ode_steps: int = 64,
                device: str = "cuda",
+               text_temperature: float = 1.0,
                token_temperature: float = 1.0,
                temperature: float = 1.0,
-               prompts: Optional[torch.Tensor] = None,
+               use_text_prompt: bool = False,
+               shift_audio_prediction: int = 0,
+               audio_prompts: Optional[torch.Tensor] = None,
+               text_prompts: Optional[torch.Tensor] = None,
+               text_attention_mask: Optional[torch.Tensor] = None,
                solver: str = "euler",
                eos_aux_token: Optional[int] = None,
                cfg_scale: float = 0.3,
@@ -96,17 +103,87 @@ class Sampler(torch.nn.Module):
 
         max_infer_steps = round(max_len * self.frame_rate / self.reduction_factor)
 
-        prev_tokens = bos_vec if prompts is None else torch.cat([bos_vec, prompts.to(device)], dim=1)
+        prev_tokens = bos_vec if audio_prompts is None else torch.cat([bos_vec, audio_prompts.to(device)], dim=1)
         prev_tokens = prev_tokens.to(torch.bfloat16)
 
+        if use_text_prompt:
+            if text_prompts is None or text_attention_mask is None:
+                raise ValueError("text_prompts and text_attention_mask must be provided when use_text_prompt is True.")
+            text_input_ids = text_prompts.to(device).long()
+            text_attention_mask = text_attention_mask.to(device).clone().long()
+            text_has_ended = text_input_ids.new_zeros(batch_size, dtype=torch.bool, device=device)
+            text_eos_index = self.gslm_pipeline.eos_index
+            audio_prompt_length = prev_tokens.shape[1] if audio_prompts is not None else 0
+            text_length = text_input_ids.shape[1]
+            diff = audio_prompt_length + shift_audio_prediction - text_length
+            print("diff", diff)
+            print("before: text_input_ids.shape", text_input_ids.shape, "prev_tokens.shape", prev_tokens.shape)
+
+            # sample text tokens until the audio_prompts length
+            if diff > 0:
+                for diff_step in range(diff):
+                    outputs = self.gslm_pipeline.decoder(
+                        input_tokens=prev_tokens[:, : text_length + diff_step], 
+                        attention_mask=prev_tokens.new_ones((batch_size, text_length + diff_step)), 
+                        text_input_ids=text_input_ids, 
+                        text_attention_mask=text_attention_mask,
+                        shift_audio_prediction=shift_audio_prediction,
+                    )
+                    logits, aux_output, text_logits = outputs
+                    next_text_logits = text_logits[:, -1, :]
+                    sampled_text = self.sample_from_logits(next_text_logits, topk=topk, topp=topp, temperature=text_temperature)
+                    text_input_ids = torch.cat([text_input_ids, sampled_text.to(text_input_ids.dtype)], dim=1)
+                    is_text_eos = sampled_text.squeeze(dim=1) == text_eos_index
+                    text_has_ended = text_has_ended | is_text_eos
+                    print(diff_step, text_attention_mask, text_input_ids.shape, text_attention_mask.shape, text_has_ended, tokenizer.batch_decode(text_input_ids))
+
+                    if text_attention_mask.shape[1] < text_input_ids.shape[1]:
+                        to_append = text_attention_mask.new_ones((batch_size, text_input_ids.shape[1] - text_attention_mask.shape[1]))
+                        to_append = to_append * (~text_has_ended).long().unsqueeze(1)
+                        text_attention_mask = torch.cat([text_attention_mask, to_append], dim=1)
+
+            print("after: text_input_ids.shape", text_input_ids.shape)
+
+        print("text_input_ids.shape", text_input_ids.shape)
+        print("prev_tokens.shape", prev_tokens.shape)
+        print("text", tokenizer.batch_decode(text_input_ids))
+        print("text_attention_mask", text_attention_mask)
+        print("finished text", text_has_ended)
         has_ended = prev_tokens.new_zeros(batch_size, dtype=torch.bool)
         stop_steps = prev_tokens.new_zeros(batch_size, dtype=torch.int32)
 
-        start_step = 0 if prompts is None else prompts.shape[1]
+        start_step = 0 if audio_prompts is None else audio_prompts.shape[1]
 
         for step in range(start_step, max_infer_steps):
+
             padding_mask = prev_tokens.new_ones((batch_size, prev_tokens.shape[1]))
-            logits, aux_output = self.gslm_pipeline.decoder(prev_tokens, padding_mask)
+ 
+            outputs = self.gslm_pipeline.decoder(
+                input_tokens=prev_tokens, 
+                attention_mask=padding_mask, 
+                text_input_ids=text_input_ids[:, :prev_tokens.shape[1]] if use_text_prompt else None, 
+                text_attention_mask=text_attention_mask[:, :prev_tokens.shape[1]] if use_text_prompt else None,
+                shift_audio_prediction=shift_audio_prediction,
+            )
+            if use_text_prompt and text_input_ids.shape[1] == prev_tokens.shape[1] + shift_audio_prediction:
+                logits, aux_output, text_logits = outputs
+                next_text_logits = text_logits[:, -1, :]
+                sampled_text = self.sample_from_logits(next_text_logits, topk=topk, topp=topp, temperature=text_temperature)
+                text_input_ids = torch.cat([text_input_ids, sampled_text.to(text_input_ids.dtype)], dim=1)
+                is_text_eos = sampled_text.squeeze(dim=1) == text_eos_index
+                text_has_ended = text_has_ended | is_text_eos
+
+                if text_attention_mask.shape[1] < text_input_ids.shape[1]:
+                    to_append = text_attention_mask.new_ones((batch_size, text_input_ids.shape[1] - text_attention_mask.shape[1]))
+                    to_append = to_append * (~text_has_ended).long().unsqueeze(1)
+                    text_attention_mask = torch.cat([text_attention_mask, to_append], dim=1)
+
+            elif use_text_prompt and text_input_ids.shape[1] > prev_tokens.shape[1] + shift_audio_prediction:
+                print("Warning: text_input_ids length greater than prev_tokens length. This should have been handled above.")
+            elif use_text_prompt and text_input_ids.shape[1] < prev_tokens.shape[1] + shift_audio_prediction:
+                raise ValueError("text_input_ids length cannot be less than prev_tokens length. It should already be handled above.")
+            else:
+                logits, aux_output = outputs
 
             # handle extra_future_tokens -> split aux_output into chunks if configured
             if getattr(self.conf.model, "extra_future_tokens", 1) > 1 and self.conf.model.reduction_factor > 1:
@@ -165,5 +242,8 @@ class Sampler(torch.nn.Module):
         if not has_ended.all():
             stop_steps[(stop_steps == 0)] = max_infer_steps
 
-        return prev_tokens[:, 1:], stop_steps
+        if use_text_prompt:
+            return prev_tokens[:, 1:], stop_steps, text_input_ids, text_attention_mask
+        else:
+            return prev_tokens[:, 1:], stop_steps
 
