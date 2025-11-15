@@ -35,7 +35,7 @@ optimizer:
 data:
     sr: 16000
     ext: flac
-    vad: True
+    vad: False
 
 training:
   batch_size: 32

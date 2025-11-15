@@ -116,8 +116,6 @@ class Sampler(torch.nn.Module):
             audio_prompt_length = prev_tokens.shape[1] if audio_prompts is not None else 0
             text_length = text_input_ids.shape[1]
             diff = audio_prompt_length + shift_audio_prediction - text_length
-            print("diff", diff)
-            print("before: text_input_ids.shape", text_input_ids.shape, "prev_tokens.shape", prev_tokens.shape)
 
             # sample text tokens until the audio_prompts length
             if diff > 0:
@@ -135,20 +133,12 @@ class Sampler(torch.nn.Module):
                     text_input_ids = torch.cat([text_input_ids, sampled_text.to(text_input_ids.dtype)], dim=1)
                     is_text_eos = sampled_text.squeeze(dim=1) == text_eos_index
                     text_has_ended = text_has_ended | is_text_eos
-                    print(diff_step, text_attention_mask, text_input_ids.shape, text_attention_mask.shape, text_has_ended, tokenizer.batch_decode(text_input_ids))
 
                     if text_attention_mask.shape[1] < text_input_ids.shape[1]:
                         to_append = text_attention_mask.new_ones((batch_size, text_input_ids.shape[1] - text_attention_mask.shape[1]))
                         to_append = to_append * (~text_has_ended).long().unsqueeze(1)
                         text_attention_mask = torch.cat([text_attention_mask, to_append], dim=1)
 
-            print("after: text_input_ids.shape", text_input_ids.shape)
-
-        print("text_input_ids.shape", text_input_ids.shape)
-        print("prev_tokens.shape", prev_tokens.shape)
-        print("text", tokenizer.batch_decode(text_input_ids))
-        print("text_attention_mask", text_attention_mask)
-        print("finished text", text_has_ended)
         has_ended = prev_tokens.new_zeros(batch_size, dtype=torch.bool)
         stop_steps = prev_tokens.new_zeros(batch_size, dtype=torch.int32)
 
@@ -178,11 +168,11 @@ class Sampler(torch.nn.Module):
                     to_append = to_append * (~text_has_ended).long().unsqueeze(1)
                     text_attention_mask = torch.cat([text_attention_mask, to_append], dim=1)
 
-            elif use_text_prompt and text_input_ids.shape[1] > prev_tokens.shape[1] + shift_audio_prediction:
-                print("Warning: text_input_ids length greater than prev_tokens length. This should have been handled above.")
+            #elif use_text_prompt and text_input_ids.shape[1] > prev_tokens.shape[1] + shift_audio_prediction:
+            #    print("Warning: text_input_ids length greater than prev_tokens length. This should have been handled above.")
             elif use_text_prompt and text_input_ids.shape[1] < prev_tokens.shape[1] + shift_audio_prediction:
                 raise ValueError("text_input_ids length cannot be less than prev_tokens length. It should already be handled above.")
-            else:
+            elif not use_text_prompt:
                 logits, aux_output = outputs
 
             # handle extra_future_tokens -> split aux_output into chunks if configured

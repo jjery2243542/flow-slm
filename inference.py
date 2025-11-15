@@ -114,6 +114,12 @@ class Processor:
         text_input_ids = tokenized.input_ids
         attention_mask = tokenized.attention_mask
         return text_input_ids.to(self.device), attention_mask.to(self.device)
+    
+    def detokenize_text(self, input_ids, attention_mask):
+        text_input_ids = input_ids.clone()
+        text_input_ids[attention_mask == 0] = self.tokenizer.pad_token_id
+        inner_texts = self.tokenizer.batch_decode(text_input_ids, skip_special_tokens=True)
+        return inner_texts
 
     def load_vocoder_mimi(self):
         self.vocoder_type = "mimi"
@@ -212,7 +218,7 @@ def prepare_sampler_and_processor(lm, conf, args, device="cuda"):
     return sampler, processor
 
 def save_wav(wav, path, sample_rate):
-    torchaudio.save(path, wav.cpu(), sample_rate, backend="soundfile")
+    torchaudio.save(path, wav.cpu(), sample_rate)
 
 def run_unconditional(args, conf, sampler, processor):
     codec_size = 2048
@@ -256,7 +262,6 @@ def run_conditional(args, conf, sampler, processor, prompt_wavs):
         reduced_feats = processor.get_ssl_feats(wav, duration, duplicate=args.batch_size)
         reduced_feats = reduced_feats.to(torch.bfloat16)
         if args.use_text_prompt:
-            print("use_text run_conditional()")
             text_ids, text_attention_mask = processor.tokenize_text([text] * args.batch_size)
         else:
             text_ids = None
@@ -296,9 +301,12 @@ def run_conditional(args, conf, sampler, processor, prompt_wavs):
 
             samples = processor.unmerge_and_unnormalize(samples)
             wavs = processor.batch_vocoding(samples, stop_steps, args.num_quantizers)
+            inner_texts = [None] * len(wavs)
+            if args.use_text_prompt:
+                inner_texts = processor.detokenize_text(text_input_ids, text_attention_mask)
 
-            for i, wav in enumerate(wavs):
-                yield prompt_id, wav, processor.sample_rate
+            for i, (wav, text) in enumerate(zip(wavs, inner_texts)):
+                yield prompt_id, wav, processor.sample_rate, text
 
 
 def main():
@@ -317,7 +325,11 @@ def main():
 
     transcription_file = None
     if args.save_transcription and args.output_dir:
-        transcription_file = open(Path(args.output_dir) / "transcriptions.csv", "w")
+        transcription_file = open(Path(args.output_dir) / "transcriptions.tsv", "w")
+        transcription_file.write("id\ttext\n")
+
+        inner_text_file = open(Path(args.output_dir) / "inner_texts.tsv", "w")
+        inner_text_file.write("id\tinner_text\n")
 
     asr_model = None
     if args.asr:
@@ -336,7 +348,7 @@ def main():
     else:
         gen_iter = run_conditional(args, conf, sampler, processor, prompt_wavs)
 
-    for idx, (prompt_id, wav, sr) in enumerate(tqdm.tqdm(gen_iter)):
+    for idx, (prompt_id, wav, sr, inner_text) in enumerate(tqdm.tqdm(gen_iter)):
         if args.save_wav and args.output_dir:
             if prompt_wavs is not None:
                 sample_idx = idx % args.samples_per_prompt
@@ -356,6 +368,9 @@ def main():
 
         if transcription_file is not None and res is not None:
             print(f"{prompt_id}_{sample_idx:04d}\t{res.text}", file=transcription_file, flush=True)
+
+        if transcription_file is not None and inner_text is not None:
+            print(f"{prompt_id}_{sample_idx:04d}\t{inner_text}", file=inner_text_file, flush=True)
 
     if transcription_file is not None:
         transcription_file.close()

@@ -25,10 +25,10 @@ class GSLMPipeline(nn.Module):
             raise NotImplementedError(f"Decoder model {self.conf.model.decoder} not supported.")
 
         attn_implementation = "flash_attention_2" if self.conf.model.flash_attention else "eager"
-        torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() or attn_implementation == 'flash_attention_2' else torch.float32
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() or attn_implementation == 'flash_attention_2' else torch.float32
         decoder_model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             trust_remote_code=True
         )
 
@@ -283,7 +283,7 @@ class GSLMWithTextPipeline(GSLMPipeline):
         )
         return logits, aux_output, text_logits
 
-    def forward(self, wavs, wav_len, text_input_ids, text_attention_mask=None, shift_audio_prediction=2, **decoder_kwargs):
+    def forward(self, wavs, wav_len, text_input_ids=None, text_attention_mask=None, shift_audio_prediction=2, **decoder_kwargs):
         # Re-implement the original GSLMPipeline.forward steps here so we don't call super().
         reduced_ssl_feats, ssl_feats, ssl_abs_len, tokens = self._get_ssl_feats(wavs, wav_len)
 
@@ -315,7 +315,7 @@ class GSLMWithTextPipeline(GSLMPipeline):
             prev_tokens,
             wav_len,
             padding_mask=padding_mask,
-            text_input_ids=text_input_ids_w_bos,
+            text_input_ids=text_input_ids_w_bos if text_input_ids is not None else None,
             text_attention_mask=text_attention_mask_w_bos if text_attention_mask is not None else None,
             **decoder_kwargs,
         )

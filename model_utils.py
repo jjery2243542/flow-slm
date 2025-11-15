@@ -8,7 +8,6 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from typing import Optional, Tuple
-from fairseq.data.data_utils import compute_mask_indices
 
 
 def apply_mask(
@@ -33,6 +32,7 @@ def apply_mask(
         Tuple of (masked_input, mask_indices)
     """
     # Don't use the same masks because the lengths are not the same
+    from fairseq.data.data_utils import compute_mask_indices
     mask_indices = compute_mask_indices(
         input.shape[:-1], 
         padding_mask=padding_mask, 

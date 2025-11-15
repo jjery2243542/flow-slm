@@ -527,6 +527,6 @@ if __name__ == "__main__":
     print("cuda_available()", torch.cuda.is_available())
     print("cuda_device_count()", torch.cuda.device_count())
     print("torch.cuda.is_bf16_supported()", torch.cuda.is_bf16_supported())
-    if torch.cuda.is_bf16_supported():
-        torch.set_float32_matmul_precision("medium")
+    #if torch.cuda.is_bf16_supported():
+    #    torch.set_float32_matmul_precision("medium")
     main()

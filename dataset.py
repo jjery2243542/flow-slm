@@ -79,13 +79,14 @@ class HFListDataset(Dataset):
 
     def __init__(self, kind: str = "mls", size: str = "full", pad_audio: bool = False,
                  reduction: int = 4, sort: bool = False, split: str = "train",
-                 vad: bool = False, use_text: bool = False):
+                 vad: bool = False, use_text: bool = False, max_duration: Optional[float] = None):
         super().__init__()
         self.kind = kind
         self.vad = vad
         self.sort = sort
         self.split = split
         self.use_text = use_text
+        self.max_duration = max_duration
 
         if kind == "people":
             datasets = [load_dataset("MLCommons/peoples_speech", subset, split=split)
@@ -136,6 +137,13 @@ class HFListDataset(Dataset):
             uid = f"{row['original_path']}_{row['begin_time']}_{row['end_time']}_{row['book_id']}_{row['speaker_id']}"
 
         wav = torch.tensor(row["audio"]["array"], dtype=torch.float32)
+        sr = row["audio"]['sampling_rate']
+
+        if self.max_duration is not None:
+            max_len = int(self.max_duration * sr)
+            if wav.shape[0] > max_len:
+                wav = wav[:max_len]
+
         if self.vad:
             wav = self._apply_vad(wav)
 
