@@ -350,6 +350,7 @@ class ELMDecoderWrapper(BaseDecoderWrapper):
 		input_tokens: torch.Tensor = None,
 		attention_mask: Optional[torch.Tensor] = None,
 		cache_position: Optional[torch.Tensor] = None,
+        **kwargs,
 	):
 		"""Forward pass for ELM decoder."""
 		inputs_embeds = self.input_proj(input_tokens)

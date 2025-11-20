@@ -291,7 +291,7 @@ def run_conditional(args, conf, sampler, processor, prompt_wavs):
                     penalize_weight=args.penalize_weight,
                     schedule=args.schedule,
                     shift_alpha=args.shift_alpha,
-                    shift_audio_prediction=conf.model.shift_audio_prediction,
+                    shift_audio_prediction=conf.model.get("shift_audio_prediction", 0), 
                 )
                 if not args.use_text_prompt:
                     samples, stop_steps = out

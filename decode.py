@@ -16,6 +16,8 @@ class Sampler(torch.nn.Module):
         self.ssl_dim = self.conf.model.ssl_dim
         self.reduction_factor = self.conf.model.reduction_factor
         self.flow_loss = flow_loss
+        self.flow_loss.x_pred = self.conf.optimizer.get("x_pred", False)
+        self.flow_loss.min_clip = self.conf.optimizer.get("min_clip", 0.05)
         self.frame_rate = frame_rate
         self.sigmoid = nn.Sigmoid()
         # default silence indices can be overridden via constructor

@@ -124,8 +124,11 @@ class FlowLoss(nn.Module):
         This project doesn't require the 'feature' mode, so all CFG is done by
         doubling the batch dimension (cond + uncond) and then combining outputs.
         """
-        if cfg_scale <= 0.0:
+        if cfg_scale <= 0.0 and not self.x_pred:
             return self.net(x, t_expand, z)
+        elif cfg_scale <= 0.0 and self.x_pred:
+            x_pred = self.net(x, t_expand, z)
+            return (x_pred - x) / torch.clip(1 - t_expand.unsqueeze(2))
 
         # prepare null embedding expanded to z shape and on correct device/dtype
         null_z = self.null_emb.weight.expand(z.shape[0], z.shape[1], -1).to(z.device, dtype=z.dtype)
