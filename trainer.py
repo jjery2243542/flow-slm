@@ -66,6 +66,8 @@ class LanguageModeling(pl.LightningModule):
                 sigma_min=self.conf.optimizer.sigma_min,
                 t_dist=self.conf.optimizer.t_dist,
                 null_prob=null_prob,
+                x_pred=self.conf.optimizer.get("x_pred", False),
+                min_clip=self.conf.optimizer.get("min_clip", 0.05),
             )
         else:
             raise NotImplementedError(f"{self.conf.optimizer.loss_function} not implemented.")
