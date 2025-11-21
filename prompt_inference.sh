@@ -20,8 +20,10 @@ conda activate lm_new_tf
 echo $CUDA_VISIBLE_DEVICES
 
 
-model_name="reduction_2"
-ckpt_dir="/share/data/speech-lang/users/jjery2243542/continuous_gslm/ckpt/textless/reduction_2/270m_reduction"
+#model_name="reduction_2"
+#ckpt_dir="/share/data/speech-lang/users/jjery2243542/continuous_gslm/ckpt/textless/reduction_2/270m_reduction"
+#model_name=extra_4
+#ckpt_dir="/share/data/speech-lang/users/jjery2243542/continuous_gslm/ckpt/textless/extra_4/270m"
 
 cfg_scale=0.3
 temp=0.8

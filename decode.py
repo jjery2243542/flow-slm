@@ -141,11 +141,11 @@ class Sampler(torch.nn.Module):
                         to_append = to_append * (~text_has_ended).long().unsqueeze(1)
                         text_attention_mask = torch.cat([text_attention_mask, to_append], dim=1)
 
+
         has_ended = prev_tokens.new_zeros(batch_size, dtype=torch.bool)
         stop_steps = prev_tokens.new_zeros(batch_size, dtype=torch.int32)
 
         start_step = 0 if audio_prompts is None else audio_prompts.shape[1]
-
         for step in range(start_step, max_infer_steps):
 
             padding_mask = prev_tokens.new_ones((batch_size, prev_tokens.shape[1]))
@@ -174,6 +174,8 @@ class Sampler(torch.nn.Module):
             #    print("Warning: text_input_ids length greater than prev_tokens length. This should have been handled above.")
             elif use_text_prompt and text_input_ids.shape[1] < prev_tokens.shape[1] + shift_audio_prediction:
                 raise ValueError("text_input_ids length cannot be less than prev_tokens length. It should already be handled above.")
+            elif use_text_prompt and text_input_ids.shape[1] > prev_tokens.shape[1] + shift_audio_prediction:
+                logits, aux_output, text_logits = outputs
             elif not use_text_prompt:
                 logits, aux_output = outputs
 

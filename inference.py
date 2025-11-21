@@ -202,7 +202,11 @@ def load_model(args, conf, device="cuda"):
     model_args = type("Args", (), {})()
     lm = LanguageModeling(model_args, conf)
     state_dict = torch.load(args.ckpt_path, map_location="cpu")
-    lm.load_state_dict(state_dict, strict=True)
+    try:
+        lm.load_state_dict(state_dict, strict=True)
+    except:
+        lm.load_state_dict(state_dict, strict=False)
+
     lm = lm.to(device).to(torch.bfloat16)
     return lm
 
