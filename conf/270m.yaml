@@ -10,7 +10,7 @@ model:
   n_special_tokens: 12
   add_special_token_to_embedding_table: True
   token_emb_dim: 256
-  n_res_blocks: 3
+  n_res_blocks: 6
   token_conditioning: True
   future_conditioning: True
   norm: "static"
